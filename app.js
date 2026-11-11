@@ -106,7 +106,7 @@ function createFallbackStorage() {
 /* ---------- Reserva de Engine ---------- */
 function createFallbackEngine() {
   return {
-    mode: (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.VideoEditor) ? 'native' : 'web',
+    mode: isNativeApp() ? 'native' : 'web',
     ready: false,
     async load() { throw new Error('El motor de vídeo (js/engine.js) aún no está disponible en esta compilación.'); },
     async getCapabilities() { throw new Error('El motor de vídeo (js/engine.js) aún no está disponible.'); },
@@ -1011,6 +1011,61 @@ function renderAudioInspector(body, actions, a) {
   body.appendChild(sliderField('Volumen', a.volume ?? 1, 0, 2, 0.05, v => v.toFixed(2), v => { a.volume = v; refreshEditorAfterEdit(); }));
 }
 
+/* ---------- Guardar en el teléfono (solo APK) ---------- */
+// Capacitor inyecta window.Capacitor con isNativePlatform() en el WebView
+// del APK. En el navegador no existe y el modo es 'web'.
+function isNativeApp() {
+  try {
+    return !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+  } catch { return false; }
+}
+// En el WebView de Android un enlace <a download> con un blob: no guarda
+// el archivo, así que en la app nativa se escribe con el plugin
+// @capacitor/filesystem (caché de la app, sin permisos) y se abre la
+// ventana de compartir para que el usuario elija dónde guardarlo
+// (Archivos, Galería, WhatsApp…). En la web no hace nada: ahí sigue el
+// enlace de descarga normal.
+function nativeFilesystem() {
+  try { return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem) || null; } catch { return null; }
+}
+function blobToBase64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => { const s = String(r.result || ''); res(s.indexOf(',') >= 0 ? s.slice(s.indexOf(',') + 1) : s); };
+    r.onerror = () => rej(r.error || new Error('No se pudo leer el vídeo.'));
+    r.readAsDataURL(blob);
+  });
+}
+// Escribe el blob en el teléfono y abre compartir. Devuelve 'shared' si se
+// abrió la ventana de compartir, 'saved' si solo quedó en el caché,
+// o null si no hay plugin nativo (web).
+async function saveBlobNative(blob, filename) {
+  const fs = nativeFilesystem();
+  if (!fs || !isNativeApp()) return null;
+  const dir = (window.Capacitor && window.Capacitor.FilesystemDirectory && window.Capacitor.FilesystemDirectory.Cache) || 'CACHE';
+  const data = await blobToBase64(blob);
+  await fs.writeFile({ path: filename, data, directory: dir });
+  const share = (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Share) || null;
+  if (share) {
+    try {
+      const uri = await fs.getUri({ path: filename, directory: dir });
+      if (uri && uri.uri) {
+        await share.share({ title: filename, files: [uri.uri], dialogTitle: 'Guardar vídeo' });
+        return 'shared';
+      }
+    } catch (e) { console.warn('Compartir no disponible:', e); }
+  }
+  return 'saved';
+}
+function showExportDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const dl = $('#btn-download-export');
+  dl.href = url;
+  dl.download = filename;
+  dl.hidden = false;
+  $('#export-status').textContent = 'Listo: ' + fmtSize(blob.size) + ' — pulsa «Descargar vídeo exportado».';
+}
+
 /* ---------- Exportar ---------- */
 $('#btn-export').addEventListener('click', async () => {
   if (!state.project || !state.project.clips.length) { toast('Añade al menos un clip antes de exportar.', 'error'); return; }
@@ -1031,12 +1086,23 @@ $('#btn-export').addEventListener('click', async () => {
     });
     if (!blob || blob.size === 0) throw new Error('La exportación devolvió un archivo vacío.');
     state.lastExportBlob = blob;
-    const url = URL.createObjectURL(blob);
-    const dl = $('#btn-download-export');
-    dl.href = url;
-    dl.download = (state.project.name || 'influencer-xl').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') + '.mp4';
-    dl.hidden = false;
-    $('#export-status').textContent = 'Listo: ' + fmtSize(blob.size) + ' — pulsa «Descargar vídeo exportado».';
+    const filename = (state.project.name || 'influencer-xl').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') + '.mp4';
+    if (isNativeApp() && nativeFilesystem()) {
+      // En el teléfono el enlace <a download> no guarda: se escribe el
+      // archivo y se abre la ventana de compartir.
+      $('#export-status').textContent = 'Listo: ' + fmtSize(blob.size) + ' — guardando en el teléfono…';
+      const saved = await saveBlobNative(blob, filename).catch(e => { console.warn('Guardado nativo falló:', e); return null; });
+      if (saved === 'shared') {
+        $('#export-status').textContent = 'Listo: ' + fmtSize(blob.size) + ' — elige dónde guardarlo en la ventana que se abrió.';
+      } else if (saved === 'saved') {
+        $('#export-status').textContent = 'Listo: ' + fmtSize(blob.size) + ' — guardado en el caché de la app.';
+      } else {
+        showExportDownload(blob, filename);
+      }
+      toast('Exportación lista (' + fmtSize(blob.size) + ').', 'success');
+      return;
+    }
+    showExportDownload(blob, filename);
     toast('Exportación lista (' + fmtSize(blob.size) + ').', 'success');
   } catch (e) {
     $('#export-status').textContent = 'Exportación fallida: ' + errMsg(e);
@@ -1341,6 +1407,19 @@ $('#btn-export-clone').addEventListener('click', async () => {
     let url = null;
     if (typeof mediaId === 'string') url = await mediaURL(mediaId).catch(() => null);
     if (!url) throw new Error('El motor compuso el clon pero no devolvió un medio descargable.');
+    // En el teléfono el enlace <a download> no guarda: se escribe el
+    // archivo y se abre la ventana de compartir.
+    if (isNativeApp() && nativeFilesystem()) {
+      const blob = await Storage.getMedia(mediaId);
+      const saved = blob ? await saveBlobNative(blob, 'influencer-xl-clon.mp4').catch(e => { console.warn('Guardado nativo falló:', e); return null; }) : null;
+      if (saved) {
+        status.textContent = saved === 'shared'
+          ? 'Clon listo y guardado en la galería. Elige dónde guardarlo en la ventana que se abrió.'
+          : 'Clon listo y guardado en la galería y en el caché de la app.';
+        toast('Clon compuesto y guardado en la galería.', 'success');
+        return;
+      }
+    }
     const dl = $('#btn-download-clone');
     dl.href = url;
     dl.download = 'influencer-xl-clon.mp4';
@@ -1414,7 +1493,7 @@ async function init() {
   await loadModules();
   try { await Storage.init(); } catch (e) { toast('No se pudo abrir la base de datos local: ' + errMsg(e), 'error', 9000); }
   $('#app-version').textContent = VERSION;
-  const mode = (Engine && Engine.mode) || ((window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.VideoEditor) ? 'native' : 'web');
+  const mode = (Engine && Engine.mode) || (isNativeApp() ? 'native' : 'web');
   setEngineBadge('Motor: sin cargar (' + mode + ')');
   window.__ixl = {
     version: VERSION,
