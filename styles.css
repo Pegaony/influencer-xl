@@ -119,6 +119,7 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .projects-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .9rem; }
 .project-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; }
 .project-card h3 { margin: 0 0 .2rem; }
+.project-cover { width: 72px; height: 96px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); float: left; margin: 0 .7rem .4rem 0; }
 .project-meta { color: var(--muted); font-size: .85rem; margin: .2rem 0 .8rem; }
 .project-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
 
@@ -216,6 +217,9 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .clip.text { background: #831843; }
 .clip.audio { background: #134e4a; }
 .clip.selected { border-color: #fff; outline: 2px solid var(--pink); }
+.cover-tile { flex: none; width: 64px; min-height: 44px; border-radius: 7px; border: 2px dashed var(--muted); background: transparent; color: var(--muted); font-size: .72rem; cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .1rem; padding: .2rem; overflow: hidden; }
+.cover-tile:hover { border-color: var(--pink); color: var(--text); }
+.cover-tile img { width: 100%; height: 28px; object-fit: cover; border-radius: 4px; }
 .clip .clip-dur { color: #d1d5db; font-size: .72rem; }
 .playhead-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--pink); z-index: 5; pointer-events: none; }
 
@@ -295,3 +299,162 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
   .field-grid { grid-template-columns: 1fr; }
   main { padding: .8rem; }
 }
+
+/* ---------- Inicio estilo CapCut (12 nov 2026) ---------- */
+.home-hero { display: grid; grid-template-columns: 1fr 1fr; gap: .9rem; margin-bottom: .9rem; }
+.home-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: .35rem;
+  padding: 1.4rem 1.2rem; border-radius: var(--radius); cursor: pointer;
+  background: var(--card); border: 1px solid var(--border); color: var(--text);
+  text-align: left; min-height: 9rem;
+}
+.home-card:hover { border-color: var(--violet); }
+.home-card-video { background: linear-gradient(135deg, #3b1d5e, #1d1d28 70%); }
+.home-card-photo { background: linear-gradient(135deg, #0e3a4d, #1d1d28 70%); }
+.home-card-icon { font-size: 2.2rem; }
+.home-card-title { font-size: 1.25rem; font-weight: 700; }
+.home-card-sub { color: var(--muted); font-size: .9rem; }
+.quick-tools {
+  display: grid; grid-template-columns: repeat(7, minmax(72px, 1fr)); gap: .5rem;
+  margin-bottom: 1rem; overflow-x: auto; padding-bottom: .2rem;
+}
+.quick-tool {
+  display: flex; flex-direction: column; align-items: center; gap: .25rem;
+  padding: .7rem .3rem; border-radius: var(--radius); cursor: pointer;
+  background: var(--card); border: 1px solid var(--border); color: var(--text);
+}
+.quick-tool:hover { border-color: var(--violet); }
+.qt-icon { font-size: 1.4rem; }
+.qt-label { font-size: .8rem; font-weight: 600; text-align: center; }
+.qt-note { font-size: .68rem; color: var(--muted); text-align: center; }
+
+/* ---------- Selector de medios (12 nov 2026) ---------- */
+.picker-modal {
+  position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end;
+  justify-content: center; background: rgba(0, 0, 0, .65);
+}
+/* Sin esto, el display:flex de arriba anula el [hidden] y el modal
+   invisible seguiría cubriendo la pantalla y bloqueando los clics. */
+.picker-modal[hidden] { display: none; }
+.picker-sheet {
+  background: var(--bg-2); border: 1px solid var(--border); border-bottom: none;
+  border-radius: 16px 16px 0 0; width: min(720px, 100%); max-height: 88vh;
+  display: flex; flex-direction: column; padding: 1rem; gap: .8rem; overflow-y: auto;
+}
+.picker-head { display: flex; justify-content: space-between; align-items: center; }
+.picker-head h2 { margin: 0; }
+.picker-albums { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.picker-tabs { display: flex; gap: .4rem; border-bottom: 1px solid var(--border); }
+.picker-tab {
+  background: transparent; border: none; color: var(--muted); cursor: pointer;
+  padding: .6rem .9rem; font-size: .95rem; font-weight: 600;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.picker-tab.active { color: var(--text); border-bottom-color: var(--violet); }
+.picker-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: .6rem;
+}
+.picker-tile {
+  position: relative; aspect-ratio: 9 / 16; border-radius: 10px; overflow: hidden;
+  background: var(--card-2); border: 2px solid transparent; cursor: pointer; padding: 0;
+}
+.picker-tile.selected { border-color: var(--violet); }
+.picker-tile img, .picker-tile video {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.picker-tile .picker-audio { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 1.8rem; }
+.picker-check {
+  position: absolute; top: .35rem; right: .35rem; width: 1.4rem; height: 1.4rem;
+  border-radius: 50%; border: 2px solid #fff; background: rgba(0, 0, 0, .45);
+  color: #fff; font-size: .8rem; display: flex; align-items: center; justify-content: center;
+}
+.picker-tile.selected .picker-check { background: var(--violet); border-color: var(--violet); }
+.picker-dur {
+  position: absolute; bottom: .3rem; right: .35rem; font-size: .72rem; font-weight: 600;
+  background: rgba(0, 0, 0, .65); color: #fff; padding: .05rem .35rem; border-radius: 4px;
+}
+.picker-name {
+  position: absolute; left: 0; right: 0; bottom: 0; font-size: .68rem; color: #fff;
+  background: linear-gradient(transparent, rgba(0, 0, 0, .75)); padding: .9rem .35rem .25rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left;
+}
+.picker-foot { display: flex; align-items: center; gap: .6rem; justify-content: flex-end; }
+.picker-foot #picker-count { margin-right: auto; }
+
+/* ---------- Teleprompter (12 nov 2026) ---------- */
+.tp-stage {
+  background: #000; border-radius: 10px; height: 45vh; overflow: hidden;
+  position: relative; cursor: pointer;
+}
+.tp-scroll {
+  position: absolute; left: 0; right: 0; top: 100%;
+  font-size: 1.9rem; font-weight: 700; line-height: 1.5; text-align: center;
+  color: #ffe600; padding: 0 1rem; white-space: pre-wrap;
+}
+textarea { width: 100%; background: var(--bg-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: .6rem; font: inherit; resize: vertical; }
+
+@media (max-width: 700px) {
+  .home-hero { grid-template-columns: 1fr 1fr; gap: .6rem; }
+  .home-card { min-height: 7.5rem; padding: 1rem .9rem; }
+  .quick-tools { grid-template-columns: repeat(7, 84px); }
+}
+
+/* ---------- Editor InShot (12 nov 2026) ---------- */
+.editor-toolbar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
+.editor-toolbar .tool-btn { flex: none; }
+.time-ruler {
+  position: relative; height: 1.1rem; margin: .2rem 0 .3rem 4.2rem;
+  border-bottom: 1px solid var(--border); font-size: .68rem; color: var(--muted);
+}
+.time-ruler span { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.time-ruler span::before {
+  content: ''; display: block; width: 1px; height: .35rem; background: var(--muted);
+  margin: 0 auto .1rem;
+}
+.timeline-actions .add-media {
+  background: #dc2626; border-color: #dc2626; color: #fff; font-weight: 800;
+  min-width: 2.2rem;
+}
+.timeline-actions .add-media:hover:not(:disabled) { background: #b91c1c; border-color: #b91c1c; }
+.clip { position: relative; overflow: hidden; }
+.clip .filmstrip {
+  position: absolute; inset: 0; display: flex; gap: 2px; padding: 2px;
+  pointer-events: none; opacity: .55;
+}
+.clip .filmstrip img { flex: 1; min-width: 0; height: 100%; object-fit: cover; border-radius: 3px; }
+.clip .clip-label { position: relative; z-index: 1; }
+.preview-fullscreen {
+  position: absolute; top: .4rem; right: .4rem; z-index: 5;
+  background: rgba(0, 0, 0, .55); border-color: transparent;
+}
+.preview-badge {
+  position: absolute; top: .4rem; left: .4rem; z-index: 5;
+  background: rgba(0, 0, 0, .65); color: #fff; font-size: .75rem; font-weight: 700;
+  padding: .2rem .5rem; border-radius: 6px;
+}
+.preview-overlays { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.preview-overlays video, .preview-overlays img { position: absolute; object-fit: cover; }
+.fx-row { display: flex; flex-wrap: wrap; gap: .4rem; margin: .4rem 0; }
+.fx-row .btn.active { background: var(--grad); color: #fff; border: none; font-weight: 700; }
+.sticker-pack { display: flex; flex-wrap: wrap; gap: .4rem; margin: .4rem 0; }
+.sticker-pack .sticker-btn {
+  font-size: 1.6rem; background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: .35rem .6rem; cursor: pointer;
+}
+.sticker-pack .sticker-btn:hover { border-color: var(--violet); }
+.pip-row, .sticker-row {
+  display: flex; align-items: center; gap: .5rem; background: var(--bg-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: .5rem .6rem; margin: .35rem 0;
+}
+.pip-row .pip-name, .sticker-row .sticker-name { flex: 1; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Generar: pestañas por tipo (paso d) ---------- */
+.gen-tabs { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .8rem; }
+.gen-tab { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 999px; padding: .45rem .9rem; font-size: .9rem; cursor: pointer; }
+.gen-tab.active { background: var(--pink); border-color: var(--pink); color: #fff; font-weight: 700; }
+.gen-reply { white-space: pre-wrap; background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: .7rem .9rem; font-size: .92rem; line-height: 1.5; max-height: 320px; overflow-y: auto; }
+.gen-shortcuts { display: flex; flex-direction: column; gap: .45rem; margin: .5rem 0; }
+.shortcut-item { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+#gen-panel-video textarea, #gen-panel-text textarea, #gen-panel-voice textarea { width: 100%; box-sizing: border-box; }
+#voice-player { width: 100%; margin-top: .5rem; }

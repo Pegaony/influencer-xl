@@ -30,6 +30,28 @@
       <h1>Proyectos</h1>
       <p class="muted">Tus vídeos, en este dispositivo. Sin cuentas ni nube.</p>
     </div>
+    <div class="home-hero">
+      <button type="button" class="home-card home-card-video" id="btn-home-new-video">
+        <span class="home-card-icon">🎬</span>
+        <span class="home-card-title">Vídeo nuevo</span>
+        <span class="home-card-sub">Elige clips y edítalos</span>
+      </button>
+      <button type="button" class="home-card home-card-photo" id="btn-home-edit-photo">
+        <span class="home-card-icon">🖼</span>
+        <span class="home-card-title">Editar foto</span>
+        <span class="home-card-sub">Retoca y anima una foto</span>
+      </button>
+    </div>
+    <div class="quick-tools" aria-label="Herramientas rápidas">
+      <button type="button" class="quick-tool" id="qt-autocut"><span class="qt-icon">✂</span><span class="qt-label">AutoCut</span></button>
+      <button type="button" class="quick-tool" id="qt-autocaptions"><span class="qt-icon">💬</span><span class="qt-label">Auto captions</span><span class="qt-note">con OpenCode</span></button>
+      <button type="button" class="quick-tool" id="qt-photo-editor"><span class="qt-icon">🖼</span><span class="qt-label">Photo editor</span></button>
+      <button type="button" class="quick-tool" id="qt-camera"><span class="qt-icon">📷</span><span class="qt-label">Camera</span></button>
+      <button type="button" class="quick-tool" id="qt-speed"><span class="qt-icon">⏩</span><span class="qt-label">Adjust speed</span></button>
+      <button type="button" class="quick-tool" id="qt-teleprompter"><span class="qt-icon">📜</span><span class="qt-label">Teleprompter</span></button>
+      <button type="button" class="quick-tool" id="qt-all-tools"><span class="qt-icon">🧰</span><span class="qt-label">All tools</span></button>
+    </div>
+    <input type="file" id="home-camera-input" accept="video/*" capture="environment" hidden>
     <div class="card new-project-card">
       <h2>Nuevo proyecto</h2>
       <div class="form-row">
@@ -51,6 +73,7 @@
         <button type="button" class="btn" id="btn-jk-template-projects">🎬 Plantilla J'K — reel 25 s</button>
       </div>
     </div>
+    <h2 class="section-title">Proyectos</h2>
     <div id="projects-list" class="projects-list"></div>
     <p class="empty" id="projects-empty" hidden>Aún no tienes proyectos. Crea el primero arriba: ponle un nombre, elige el formato y pulsa «Crear proyecto».</p>
   </section>
@@ -63,6 +86,8 @@
         <p class="muted" id="editor-project-meta">Sin proyecto abierto</p>
       </div>
       <div class="editor-head-actions">
+        <button type="button" class="btn small" id="btn-undo" title="Deshacer" disabled>↩ Deshacer</button>
+        <button type="button" class="btn small" id="btn-redo" title="Rehacer" disabled>↪ Rehacer</button>
         <label class="inline-label">Formato
           <select id="editor-ratio"></select>
         </label>
@@ -108,6 +133,9 @@
             <video id="preview-video" playsinline preload="metadata"></video>
             <img id="preview-image" alt="" hidden>
             <div id="preview-texts" class="preview-texts"></div>
+            <div id="preview-overlays" class="preview-overlays"></div>
+            <div class="preview-badge" id="preview-badge" hidden></div>
+            <button type="button" class="btn small preview-fullscreen" id="btn-fullscreen" title="Pantalla completa" aria-label="Pantalla completa">⛶</button>
             <div class="preview-empty" id="preview-empty">Añade un clip desde la galería para verlo aquí.</div>
           </div>
           <div class="preview-controls">
@@ -124,14 +152,18 @@
           <div class="timeline-toolbar">
             <h2>Línea de tiempo</h2>
             <div class="timeline-actions">
+              <button type="button" class="btn small add-media" id="btn-add-media" title="Añadir medios de la galería">＋</button>
               <button type="button" class="btn small" id="btn-add-text">+ Texto</button>
+              <button type="button" class="btn small" id="btn-autocaptions" title="Subtítulos automáticos con Whisper (motor PC)">🎙 Subtítulos</button>
               <button type="button" class="btn small" id="btn-split">✂ Dividir en el cursor</button>
               <button type="button" class="btn small" id="btn-duplicate-clip">⧉ Duplicar</button>
               <button type="button" class="btn small" id="btn-move-left">← Mover</button>
               <button type="button" class="btn small" id="btn-move-right">Mover →</button>
+              <button type="button" class="btn small" id="btn-mute-clip" title="Silenciar el clip seleccionado">🔇 Silenciar</button>
               <button type="button" class="btn small danger" id="btn-delete-clip">🗑 Eliminar</button>
             </div>
           </div>
+          <div class="time-ruler" id="time-ruler" aria-hidden="true"></div>
           <div class="timeline" id="timeline">
             <div class="track" data-track="video"><span class="track-label">Vídeo</span><div class="track-lane" id="track-video"></div></div>
             <div class="track" data-track="texts"><span class="track-label">Textos</span><div class="track-lane" id="track-texts"></div></div>
@@ -146,9 +178,17 @@
         <button type="button" class="tool-btn" id="tb-text">＋ Texto</button>
         <button type="button" class="tool-btn" id="tb-split">✂ Dividir</button>
         <button type="button" class="tool-btn" id="tb-filters">🎨 Filtros</button>
+        <button type="button" class="tool-btn" id="tb-effects">✨ Efectos</button>
+        <button type="button" class="tool-btn" id="tb-rotate">↻ Girar</button>
         <button type="button" class="tool-btn" id="tb-speed">⏩ Velocidad</button>
         <button type="button" class="tool-btn" id="tb-transition">🔀 Transición</button>
         <button type="button" class="tool-btn" id="tb-keyframes">✨ Keyframes</button>
+        <button type="button" class="tool-btn" id="tb-animation">🎞 Animación</button>
+        <button type="button" class="tool-btn" id="tb-pip">🖼 PIP</button>
+        <button type="button" class="tool-btn" id="tb-sticker">😀 Adhesivo</button>
+        <button type="button" class="tool-btn" id="tb-mask">◯ Máscara</button>
+        <button type="button" class="tool-btn" id="tb-background">🖼 Fondo</button>
+        <button type="button" class="tool-btn" id="tb-crop">✂ Cortar</button>
         <button type="button" class="tool-btn" id="tb-jk">🎬 Estilo J'K</button>
         <button type="button" class="tool-btn" id="tb-inspector">🔍 Inspector</button>
       </div>
@@ -180,10 +220,16 @@
   <!-- ============ IMÁGENES ============ -->
   <section class="screen" id="screen-images" aria-label="Imágenes">
     <div class="screen-head">
-      <h1>Imágenes</h1>
-      <p class="muted">Genera imágenes con IA y añádelas a tu línea de tiempo.</p>
+      <h1>Generar</h1>
+      <p class="muted">Genera imágenes con IA, prepara vídeos desde una foto, pide texto al agente y genera voz con la PC. Todo gratis, cambiando de modelo cuando se acabe el crédito.</p>
     </div>
-    <div class="card">
+    <div class="gen-tabs" role="tablist" aria-label="Tipo de generación">
+      <button type="button" class="gen-tab active" data-gen-tab="image" role="tab">🖼 Imagen</button>
+      <button type="button" class="gen-tab" data-gen-tab="video" role="tab">🎬 Vídeo</button>
+      <button type="button" class="gen-tab" data-gen-tab="text" role="tab">✍️ Texto</button>
+      <button type="button" class="gen-tab" data-gen-tab="voice" role="tab">🎙 Voz</button>
+    </div>
+    <div class="card" id="gen-panel-image">
       <div class="form-row wrap">
         <label class="grow">Descripción (prompt)
           <input type="text" id="img-prompt" placeholder="Ej.: cantante cubano en un bulevar al atardecer, estilo reparto" maxlength="500">
@@ -200,8 +246,10 @@
         </label>
         <label>Modelo
           <select id="img-model">
-            <option value="pollinations" selected>Pollinations — foto gratis (sin clave)</option>
-            <option value="hf">Hugging Face FLUX.1-schnell (necesita token)</option>
+            <option value="pollinations" selected>Pollinations — Sana, foto gratis (sin clave)</option>
+            <option value="horde">AI Horde — gratis (anónimo, ~50 s por imagen)</option>
+            <option value="cloudflare">Cloudflare Workers AI — FLUX.1-schnell (necesita token)</option>
+            <option value="hf">Hugging Face FLUX.1-schnell (con token, de pago)</option>
           </select>
         </label>
         <label class="check-row">📷 Foto realista
@@ -209,8 +257,96 @@
         </label>
         <button type="button" class="btn primary" id="btn-generate">✦ Generar imagen</button>
       </div>
-      <p class="muted small" id="img-model-note">Con «Foto realista» tu descripción se completa sola con luz natural, enfoque nítido y anatomía realista, para que la foto salga coherente y parezca real. Pollinations es gratis y sin clave. Si pide esperar, te avisaremos con una cuenta atrás de ~45 s entre imágenes.</p>
+      <p class="muted small" id="img-model-note">Con «Foto realista» tu descripción se completa sola con luz natural, enfoque nítido y anatomía realista, para que la foto salga coherente y parezca real. Pollinations es gratis y sin clave (modelo Sana, no FLUX). Si pide esperar, te avisaremos con una cuenta atrás de ~45 s entre imágenes.</p>
       <p class="muted small" id="img-status" role="status"></p>
+    </div>
+    <div class="card" id="gen-panel-video" hidden>
+      <h2>Vídeo desde una foto (imagen → vídeo)</h2>
+      <p class="muted small">El vídeo siempre empieza de una foto fija (hero still): así la cara no cambia. Elige la foto, escribe qué tiene que pasar y abre el servicio gratis que quieras — el prompt se copia solo.</p>
+      <div class="form-row wrap">
+        <button type="button" class="btn" id="btn-video-hero">🖼 Elegir foto hero de la galería</button>
+        <span class="muted small" id="video-hero-name">Sin foto hero — elige una de la galería.</span>
+      </div>
+      <label>Qué pasa en el vídeo
+        <input type="text" id="video-prompt" placeholder="Ej.: el cantante camina por el bulevar y saluda con la mano" maxlength="500">
+      </label>
+      <label>Duración orientativa
+        <select id="video-duration">
+          <option value="5" selected>~5 s (la mayoría de los gratis)</option>
+          <option value="10">~10 s</option>
+          <option value="15">~15 s (Seedance 2.0)</option>
+          <option value="30">~30 s (Seedance 2.5)</option>
+        </select>
+      </label>
+      <div class="form-row wrap">
+        <button type="button" class="btn" id="btn-video-copy">📋 Copiar prompt de vídeo</button>
+        <span class="muted small" id="video-status" role="status"></span>
+      </div>
+      <p class="muted small">Atajos web (sin API pública — se abren en el navegador):</p>
+      <div class="gen-shortcuts" id="video-shortcuts"></div>
+      <p class="muted small">Flick usa tus 100 créditos (vencen el 15 nov 2026). fal.ai sandbox da 5 vídeos MiniMax H3 al día. Dola (Seedance 2.0/2.5) es la app oficial de ByteDance: ~10–12 vídeos por cuenta de Google, con marca de agua que tú quitas después. Los demás son cuentas gratis con límites diarios.</p>
+    </div>
+    <div class="card" id="gen-panel-text" hidden>
+      <h2>Texto con IA</h2>
+      <p class="muted small">Pídele al agente ideas, guiones, captions o respuestas. Sin pagar: por la PC (OpenCode, modelos gratis de OpenRouter) o por Groq (gratis con clave).</p>
+      <label>Modelo de texto
+        <select id="text-model">
+          <option value="opencode" selected>Agente OpenCode (PC — gratis, OpenRouter)</option>
+          <option value="groq">Groq (gratis con clave, Llama 3.3 70B)</option>
+        </select>
+      </label>
+      <label>Pregunta o pide lo que quieras
+        <textarea id="text-prompt" rows="3" placeholder="Ej.: dame 3 ideas de Reels para AL BERRO con gancho en los primeros 2 segundos" maxlength="2000"></textarea>
+      </label>
+      <div class="form-row wrap">
+        <button type="button" class="btn primary" id="btn-ask-text">✦ Preguntar</button>
+        <button type="button" class="btn" id="btn-copy-text-reply">📋 Copiar respuesta</button>
+      </div>
+      <p class="muted small" id="text-status" role="status"></p>
+      <pre class="gen-reply" id="text-reply" hidden></pre>
+    </div>
+    <div class="card" id="gen-panel-voice" hidden>
+      <h2>Voz con la PC (Windows)</h2>
+      <p class="muted small">La PC genera la voz con su sintetizador integrado (sin pagar, sin nube). Ojo: en Datar solo hay voces en inglés instaladas (David y Zira) — el español sonará con acento inglés. Para voz en español hay que instalar una voz es-ES en la PC (Configuración → Voz).</p>
+      <label>Texto para la voz
+        <textarea id="voice-text" rows="3" placeholder="Ej.: La que se haga la loca me le voy, al berro" maxlength="1000"></textarea>
+      </label>
+      <div class="form-row wrap">
+        <button type="button" class="btn primary" id="btn-tts">🎙 Generar voz (PC)</button>
+        <span class="muted small" id="voice-status" role="status"></span>
+      </div>
+      <audio id="voice-player" controls hidden></audio>
+      <p class="muted small">El audio queda guardado en la galería y se puede añadir a la línea de tiempo como audio.</p>
+    </div>
+    <div class="card" id="gen-character-block">
+      <h2>Personaje fijo del proyecto</h2>
+      <p class="muted small">Regla de consistencia: todo lo que se genere para este proyecto usa la misma cara, la misma ropa y el mismo estilo. Elige la foto hero y la descripción base una vez; la app las añade sola a cada prompt.</p>
+      <div id="character-block-empty" class="muted small">Abre un proyecto en el Editor para fijar su personaje.</div>
+      <div id="character-block-form" hidden>
+        <div class="form-row wrap">
+          <button type="button" class="btn" id="btn-character-hero">🖼 Elegir foto hero</button>
+          <span class="muted small" id="character-hero-name">Sin foto hero.</span>
+        </div>
+        <label>Descripción base del personaje
+          <input type="text" id="character-base" placeholder="Ej.: cantante cubano, camisa naranja, pelo corto, piel morena" maxlength="300">
+        </label>
+        <div class="form-row wrap">
+          <label>Semilla fija (0 = aleatoria)
+            <input type="number" id="character-seed" min="0" max="999999999" step="1" value="0">
+          </label>
+          <label>Estilo
+            <select id="character-style">
+              <option value="jk" selected>Estilo J'K (cinematográfico)</option>
+              <option value="none">Sin estilo fijo</option>
+            </select>
+          </label>
+        </div>
+        <label>Palabra clave (trigger)
+          <input type="text" id="character-trigger" placeholder="Ej.: EL PEGAONY" maxlength="60">
+        </label>
+        <button type="button" class="btn primary" id="btn-save-character">Guardar personaje</button>
+        <span class="muted small" id="character-status" role="status"></span>
+      </div>
     </div>
     <h2 class="section-title">Galería de imágenes</h2>
     <div id="images-grid" class="images-grid"></div>
@@ -284,16 +420,51 @@
     </div>
     <div class="card settings-card">
       <h2>Claves de IA</h2>
-      <label>Token de Hugging Face (gratis)
+      <label>Token de Hugging Face (de pago)
         <input type="password" id="setting-hf-token" placeholder="hf_…" autocomplete="off">
       </label>
-      <p class="muted small">Necesario para FLUX.1-schnell y para quitar el fondo. Consigue uno gratis en huggingface.co/settings/tokens.</p>
+      <p class="muted small">Necesario para FLUX.1-schnell y para quitar el fondo. El nivel gratis de Hugging Face ya no existe (gratis = nada): el token es de pago o con créditos. Consíguelo en huggingface.co/settings/tokens.</p>
       <label>Clave de Pollinations (opcional)
         <input type="password" id="setting-pollinations-key" placeholder="Opcional — sin clave funciona igual" autocomplete="off">
       </label>
-      <p class="muted small">La clave es opcional — sin clave funciona igual.</p>
+      <p class="muted small">La clave es opcional — sin clave funciona igual. El modelo anónimo de Pollinations es Sana (no FLUX).</p>
+      <label>Clave de Groq (opcional, para texto)
+        <input type="password" id="setting-groq-key" placeholder="gsk_… — gratis en console.groq.com" autocomplete="off">
+      </label>
+      <p class="muted small">Groq tiene nivel gratis con clave: texto rápido con Llama. Sin clave, el texto va por el motor OpenCode de la PC.</p>
+      <label>Token de Cloudflare (opcional, para FLUX en la nube)
+        <input type="password" id="setting-cf-token" placeholder="Token con permiso de Workers AI" autocomplete="off">
+      </label>
+      <p class="muted small">Cloudflare Workers AI (FLUX.1-schnell, ~57 imágenes/día gratis) necesita un token NUEVO con permiso de Workers AI. Sin token, esa opción queda pendiente y la app lo dice; no se finge.</p>
       <button type="button" class="btn primary" id="btn-save-settings">Guardar ajustes</button>
       <span class="muted small" id="settings-status" role="status"></span>
+    </div>
+    <div class="card settings-card">
+      <h2>Motor PC — OpenCode (Datar)</h2>
+      <p class="muted small">El motor de la PC hace lo que el teléfono no puede: estabilizar con vidstab, subtítulos automáticos con Whisper y texto con los modelos gratis de OpenRouter. El servidor OpenCode corre en Datar (puerto 4096) y arranca solo al iniciar sesión en la PC.</p>
+      <label>URL del servidor
+        <input type="text" id="setting-opencode-url" placeholder="http://100.93.202.6:4096" autocomplete="off" inputmode="url">
+      </label>
+      <div class="form-row wrap">
+        <button type="button" class="btn small" id="btn-opencode-pc">En esta PC</button>
+        <button type="button" class="btn small" id="btn-opencode-phone">Desde el teléfono</button>
+      </div>
+      <p class="muted small">«En esta PC» pone http://127.0.0.1:4096. «Desde el teléfono» pone http://100.93.202.6:4096 (por Tailscale).</p>
+      <label>Contraseña del servidor
+        <input type="password" id="setting-opencode-password" placeholder="La fija de start-opencode-server.cmd" autocomplete="off">
+      </label>
+      <p class="muted small">La contraseña fija está en C:\Users\arti\start-opencode-server.cmd en Datar. Se guarda solo en este dispositivo, igual que los demás tokens.</p>
+      <label>Modelo Whisper (subtítulos)
+        <select id="setting-whisper-model">
+          <option value="tiny" selected>tiny — rápido (~12 s por clip de 5 s)</option>
+          <option value="base">base — más preciso, más lento</option>
+        </select>
+      </label>
+      <div class="form-row wrap">
+        <button type="button" class="btn" id="btn-opencode-test">Probar conexión</button>
+        <span class="muted small" id="opencode-status" role="status"></span>
+      </div>
+      <p class="muted small" id="opencode-note">Si el servidor no responde, revisa que la PC esté encendida, que OpenCode esté corriendo y que la URL y la contraseña sean las correctas.</p>
     </div>
     <div class="card settings-card">
       <h2>Datos</h2>
@@ -308,6 +479,57 @@
     </div>
   </section>
 </main>
+
+<!-- ============ SELECTOR DE MEDIOS ============ -->
+<div class="picker-modal" id="media-picker" hidden role="dialog" aria-modal="true" aria-label="Elegir medios">
+  <div class="picker-sheet">
+    <div class="picker-head">
+      <h2 id="picker-title">Elegir vídeos</h2>
+      <button type="button" class="icon-btn" id="picker-close" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="picker-albums">
+      <span class="muted small">Álbumes:</span>
+      <button type="button" class="chip active" id="picker-album-library">📁 Biblioteca</button>
+      <button type="button" class="btn small" id="picker-upload">＋ Subir</button>
+      <input type="file" id="picker-upload-input" accept="video/*,image/*" multiple hidden>
+    </div>
+    <div class="picker-tabs" role="tablist" aria-label="Tipo de medio">
+      <button type="button" class="picker-tab active" id="picker-tab-video" data-kind="video">Vídeos</button>
+      <button type="button" class="picker-tab" id="picker-tab-image" data-kind="image">Fotos</button>
+    </div>
+    <div class="picker-grid" id="picker-grid"></div>
+    <p class="empty small" id="picker-empty" hidden>No hay nada aquí todavía. Sube un archivo con «＋ Subir».</p>
+    <div class="picker-foot">
+      <span class="muted small" id="picker-count">0 seleccionados</span>
+      <button type="button" class="btn" id="picker-cancel">Cancelar</button>
+      <button type="button" class="btn primary" id="picker-add" disabled>Añadir</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TELEPROMPTER ============ -->
+<div class="picker-modal" id="teleprompter" hidden role="dialog" aria-modal="true" aria-label="Teleprompter">
+  <div class="picker-sheet">
+    <div class="picker-head">
+      <h2>Teleprompter</h2>
+      <button type="button" class="icon-btn" id="tp-close" aria-label="Cerrar">✕</button>
+    </div>
+    <label>Texto que vas a leer
+      <textarea id="tp-text" rows="4">La que se haga la loca me le voy, Al berro</textarea>
+    </label>
+    <label class="slider-label">Velocidad: <span id="tp-speed-value">40</span>
+      <input type="range" id="tp-speed" min="10" max="120" value="40" step="5">
+    </label>
+    <div class="btn-col">
+      <button type="button" class="btn primary" id="tp-start">▶ Empezar</button>
+    </div>
+    <div class="tp-stage" id="tp-stage" hidden><div class="tp-scroll" id="tp-scroll"></div></div>
+    <div class="btn-col">
+      <button type="button" class="btn" id="tp-stop" hidden>⏸ Parar</button>
+    </div>
+    <p class="muted small">Lee el texto mientras grabas con la cámara del teléfono. Pulsa sobre el texto para pausar o reanudar.</p>
+  </div>
+</div>
 
 <div id="toasts" aria-live="polite"></div>
 <div id="modal-root"></div>
