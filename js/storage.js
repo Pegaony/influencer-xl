@@ -13,6 +13,20 @@ const SETTINGS_KEY = 'ixl.settings';
 const DEFAULT_SETTINGS = Object.freeze({ hfToken: '', pollinationsKey: '', theme: 'dark' });
 
 let _dbPromise = null;
+let _db = null; // conexión abierta actual (null si no hay)
+
+// Error de conexión cerrada: el navegador cerró la base (pestaña inactiva,
+// otra pestaña actualizó la versión, etc.) y la transacción ya no vale.
+// Es el error real visto en vivo el 11 nov 2026: "Failed to execute
+// 'transaction' on 'IDBDatabase': The database connection is closing".
+function isClosedDbError(err) {
+  if (!err) return false;
+  const name = err.name || '';
+  const msg = String(err.message || err);
+  return name === 'InvalidStateError'
+    || /connection is closing/i.test(msg)
+    || /database connection is closing/i.test(msg);
+}
 
 function openDB() {
   if (_dbPromise) return _dbPromise;
@@ -30,7 +44,26 @@ function openDB() {
         projects.createIndex('updatedAt', 'updatedAt', { unique: false });
       }
     };
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      _db = db;
+      // Si el navegador cierra la conexión, la promesa cacheada quedaría
+      // apuntando a una base cerrada y TODA transacción fallaría con
+      // "The database connection is closing" hasta recargar la página.
+      // Al cerrar (o al pedir otra pestaña una versión nueva), se resetea
+      // la promesa para que la próxima llamada reabra sola.
+      const mine = _dbPromise;
+      db.onclose = () => {
+        if (_db === db) _db = null;
+        if (_dbPromise === mine) _dbPromise = null;
+      };
+      db.onversionchange = () => {
+        try { db.close(); } catch { /* ya cerrada */ }
+        if (_db === db) _db = null;
+        if (_dbPromise === mine) _dbPromise = null;
+      };
+      resolve(db);
+    };
     req.onerror = () => reject(req.error || new Error('No se pudo abrir IndexedDB'));
     req.onblocked = () => reject(new Error('IndexedDB bloqueada por otra pestaña'));
   });
@@ -39,21 +72,44 @@ function openDB() {
   return _dbPromise;
 }
 
-function tx(storeName, mode, fn) {
-  return openDB().then((db) => new Promise((resolve, reject) => {
-    const t = db.transaction(storeName, mode);
-    const store = t.objectStore(storeName);
-    let result;
+// Una transacción: si la conexión se cerró (entre openDB() y la
+// transacción, o a mitad de ella), se reabre y se reintenta UNA vez.
+// Sin este reintento, un cierre del navegador dejaba la app sin poder
+// guardar nada hasta recargar (el relleno de la Plantilla J'K no persistía).
+function tx(storeName, mode, fn, _retried) {
+  return openDB().then((db) => {
+    let txn;
     try {
-      result = fn(store);
+      txn = db.transaction(storeName, mode);
     } catch (err) {
-      reject(err);
-      return;
+      if (!_retried && isClosedDbError(err)) {
+        _dbPromise = null;
+        return tx(storeName, mode, fn, true);
+      }
+      throw err;
     }
-    t.oncomplete = () => resolve(result);
-    t.onerror = () => reject(t.error || new Error('Error en la transacción IndexedDB'));
-    t.onabort = () => reject(t.error || new Error('Transacción IndexedDB abortada'));
-  }));
+    return new Promise((resolve, reject) => {
+      const store = txn.objectStore(storeName);
+      let result;
+      try {
+        result = fn(store);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const retryOrReject = (err) => {
+        if (!_retried && isClosedDbError(err)) {
+          _dbPromise = null;
+          tx(storeName, mode, fn, true).then(resolve, reject);
+        } else {
+          reject(err);
+        }
+      };
+      txn.oncomplete = () => resolve(result);
+      txn.onerror = () => retryOrReject(txn.error || new Error('Error en la transacción IndexedDB'));
+      txn.onabort = () => retryOrReject(txn.error || new Error('Transacción IndexedDB abortada'));
+    });
+  });
 }
 
 function reqAsPromise(req) {
@@ -72,6 +128,17 @@ function newId() {
 export const Storage = {
   async init() {
     await openDB();
+  },
+
+  // Solo para pruebas (smoke-idb): cierra la conexión cacheada, simulando
+  // que el navegador la cierre, para comprobar que la próxima operación
+  // reabre sola y el guardado no se pierde.
+  _forceCloseForTest() {
+    if (_db) {
+      try { _db.close(); } catch { /* ya cerrada */ }
+      _db = null;
+    }
+    _dbPromise = null;
   },
 
   async saveMedia(blob, { name, kind, width = null, height = null, duration = null }) {

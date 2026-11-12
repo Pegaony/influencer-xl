@@ -213,7 +213,7 @@ async function _ensureLoaded() {
   await Engine.load();
 }
 
-async function _exec(args, { ignoreError = false, onProgress = null, totalUs = 0 } = {}) {
+async function _exec(args, { ignoreError = false, onProgress = null, totalUs = 0, restore = null } = {}) {
   await _ensureLoaded();
   const lines = [];
   _currentLines = lines;
@@ -223,6 +223,41 @@ async function _exec(args, { ignoreError = false, onProgress = null, totalUs = 0
     const ret = await _ffmpeg.exec(args, -1);
     if (ret !== 0 && !ignoreError) {
       const tail = lines.slice(-8).join('\n') || '(sin registro)';
+      // Peculiaridad del núcleo wasm (12 nov 2026): tras correr loudnorm,
+      // vibrato/tremolo sobre silencio digital puede fallar con
+      // "Input contains (near) NaN/+-Inf" por estado residual del heap.
+      // Bisecado 12 nov: el fallo es DETERMINISTA con la misma historia de
+      // sesión — getCapabilities() + varias ops de vídeo + loudnorm, y luego
+      // vibrato/tremolo (efecto robot); sin getCapabilities pasa, y en una
+      // instancia nueva también pasa. Por eso el reintento en caliente no
+      // basta: con restore disponible se RECARGA la instancia (heap limpio,
+      // MEMFS vacío) y se reescriben las entradas antes de reintentar UNA
+      // vez; sin restore se mantiene el reintento en caliente. Si el
+      // reintento también falla, se devuelve el error real, nunca un
+      // resultado fingido.
+      if (/nan/i.test(tail)) {
+        if (typeof restore === 'function') {
+          try {
+            Engine.cancel();
+            await _ensureLoaded();
+            await restore();
+          } catch {
+            throw new Error(`FFmpeg falló (código ${ret}) y no se pudo recargar el motor para reintentar. Últimas líneas del registro:\n${tail}`);
+          }
+          _progressCb = onProgress;
+          _progressTotalUs = totalUs;
+          lines.length = 0;
+          const ret2 = await _ffmpeg.exec(args, -1);
+          if (ret2 === 0) return { ret: ret2, lines };
+          const tail2 = lines.slice(-8).join('\n') || '(sin registro)';
+          throw new Error(`FFmpeg falló (código ${ret2}) tras recargar el motor. Últimas líneas del registro:\n${tail2}`);
+        }
+        lines.length = 0;
+        const ret2 = await _ffmpeg.exec(args, -1);
+        if (ret2 === 0) return { ret: ret2, lines };
+        const tail2 = lines.slice(-8).join('\n') || '(sin registro)';
+        throw new Error(`FFmpeg falló (código ${ret2}). Últimas líneas del registro:\n${tail2}`);
+      }
       throw new Error(`FFmpeg falló (código ${ret}). Últimas líneas del registro:\n${tail}`);
     }
     return { ret, lines };
@@ -389,20 +424,99 @@ function clipDuration(clip, info) {
   return d;
 }
 
-// Cadena de vídeo de un clip. Devuelve {chain, needsAlpha}.
+// ---------------------------------------------------------------------------
+// Receta "Cómic" (Estilo J'K) — colores planos + contornos negros.
+//   Rama de color: colores planos (posterizado) + eq saturado.
+//   Rama de bordes: edgedetect → negate (líneas negras sobre blanco).
+//   Unión: blend multiply por planos (luma multiply, croma = la de la rama
+//   de color): el blanco deja pasar el color y las líneas negras quedan
+//   como contorno.
+// HALLAZGOS (11 Nov 2026, verificados con fotogramas reales):
+//   - `posterize` NO existe en el core wasm (@ffmpeg/core 0.12.10 = FFmpeg
+//     7.0; posterize llegó en 7.1) ni en el ffmpeg del sistema. El
+//     posterizado se hace con `lutyuv` (cuantiza luma y croma a pasos de 36).
+//   - `blend=all_mode=multiply` a secas NO vale: multiplica también los
+//     planos de croma y todo se vuelve verde.
+//   - **NO usar `split` para las dos ramas**: tras `scale`, el filtro
+//     edgedetect destruye el croma del fotograma compartido y el Cómic sale
+//     en gris (comprobado: con split + scale la salida es gris; sin split,
+//     a color). La rama de bordes lee el mismo medio de una SEGUNDA entrada
+//     (`c.edgeInputIdx` en exportTimeline, `-i` duplicado en applyComic).
+// Requiere: edgedetect, negate, format, lutyuv, eq, blend.
+// ---------------------------------------------------------------------------
+
+// Posterizado + saturación de la rama de color (después de la cadena base).
+const COMIC_FLAT = `lutyuv=y='trunc(val/36)*36':u='128+trunc((val-128)/36)*36':v='128+trunc((val-128)/36)*36',eq=brightness=0.02:contrast=1.12:saturation=1.9`;
+// Bordes del Cómic (después de la cadena geométrica de la segunda entrada).
+const COMIC_EDGE = 'edgedetect=low=0.08:high=0.35,negate,format=yuv420p';
+// Unión de las dos ramas: luma multiplicada, croma de la rama de color.
+function comicBlend(flatLabel, edgeLabel, outLabel) {
+  return `[${flatLabel}][${edgeLabel}]blend=c0_mode=multiply:c1_expr=A:c2_expr=A[${outLabel}]`;
+}
+
+// Presets de look por clip (Estilo J'K): 'none' | 'bw' (blanco y negro) |
+// 'color' (color intenso) | 'comic' (receta Cómic). Viven en
+// clip.filters.preset; los proyectos viejos sin preset se tratan como 'none'.
+
+// Pack de efectos de un toque (InShot, ola 1): recetas validadas con el
+// ffmpeg del sistema el 12 nov 2026 (/tmp/validate-recipes.sh, 26/26).
+// Se aplican tras el look (B/N/Color/Cómic) y antes del croma/opacidad.
+// `shake` recorta 20 px y mueve el encuadre con el tiempo; el scale final
+// devuelve el marco a W×H (el concat exige dimensiones iguales).
+const EFFECT_FILTERS = {
+  vintage: () => 'curves=preset=vintage,colorbalance=rs=0.1:bs=-0.1,vignette=PI/5',
+  sepia: () => 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+  blur: () => 'gblur=sigma=8',
+  glitch: () => 'noise=alls=20:allf=t+u,rgbashift=rh=6:bh=-6,hue=s=1.3',
+  shake: (W, H) => `crop=iw-20:ih-20:'10*sin(2*PI*t*3)':'10*cos(2*PI*t*3)',scale=${W}:${H}`,
+  neon: () => 'eq=saturation=1.8:contrast=1.15,unsharp=5:5:1.0',
+};
+const EFFECT_LABELS = {
+  none: 'Ninguno', vintage: 'Vintage', sepia: 'Sepia', blur: 'Desenfoque',
+  glitch: 'Glitch', shake: 'Sacudida', neon: 'Neón',
+};
+
+// Cadena de vídeo de un clip. Devuelve {graph, vLabel, needsAlpha}: graph es
+// la lista de sentencias del grafo (la primera termina en [v{i}]) y vLabel
+// es la etiqueta del vídeo procesado de ese clip.
 function buildClipVideoFilter(c, W, H, fps) {
-  const parts = [];
+  // Cadena geométrica (recorte, escala, rotación, zoompan): es COMÚN a la
+  // rama de color y a la de bordes del Cómic, para que los contornos caigan
+  // sobre la misma imagen. Sin el prefijo de entrada (se añade por rama).
+  const geo = [];
   if (c.kind === 'image') {
-    parts.push(`[${c.inputIdx}:v]fps=${fps},format=yuv420p`);
+    geo.push(`fps=${fps},format=yuv420p`);
   } else {
-    parts.push(`[${c.inputIdx}:v]trim=start=${fmt(c.trimStart)}:end=${fmt(c.trimEnd)},setpts=(PTS-STARTPTS)/${fmt(c.speed)},fps=${fps}`);
+    geo.push(`trim=start=${fmt(c.trimStart)}:end=${fmt(c.trimEnd)},setpts=(PTS-STARTPTS)/${fmt(c.speed)},fps=${fps}`);
   }
-  parts.push(`scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`);
+  // Girar 90° + voltear (ola 1): antes del escalado, porque transpose
+  // cambia las dimensiones y el cover se adapta solo.
+  if (c.rotate === 90) geo.push('transpose=1');
+  else if (c.rotate === 180) geo.push('hflip,vflip');
+  else if (c.rotate === 270) geo.push('transpose=2');
+  if (c.flipH) geo.push('hflip');
+  if (c.flipV) geo.push('vflip');
+  // Cortar (encuadre, ola 2): x/y/w/h en fracciones del marco original.
+  if (c.crop && c.crop.w > 0 && c.crop.h > 0) {
+    geo.push(`crop=iw*${fmt(c.crop.w)}:ih*${fmt(c.crop.h)}:iw*${fmt(c.crop.x || 0)}:ih*${fmt(c.crop.y || 0)}`);
+  }
+  // Fondo + Lona (ola 2): cover (actual) o contain con fondo negro, color
+  // o desenfocado. Con fondo desenfocado el marco NO se rellena aquí: el
+  // paso final compone el fondo borroso desde el propio clip.
+  const containBlur = c.fit === 'contain' && c.bg === 'blur';
+  if (containBlur) {
+    geo.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease`);
+  } else if (c.fit === 'contain') {
+    const padColor = c.bg === 'color' ? ffColor(c.bgColor || '#000000') : 'black';
+    geo.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:${padColor}`);
+  } else {
+    geo.push(`scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H}`);
+  }
 
   const rotExpr = interpExpr(c.keyframes, 'rotation', 't');
   if (rotExpr !== null) {
     // rotate mantiene W×H por defecto (out_w/out_h son iw/ih).
-    parts.push(`rotate='(${rotExpr})*(0.0174532925)':fillcolor=black`);
+    geo.push(`rotate='(${rotExpr})*(0.0174532925)':fillcolor=black`);
   }
 
   const tVar = `(on/${fps})`;
@@ -412,37 +526,121 @@ function buildClipVideoFilter(c, W, H, fps) {
   const needsZP = (scaleE !== null && scaleE !== '1')
     || (xE !== null && xE !== '0')
     || (yE !== null && yE !== '0');
-  if (needsZP) {
-    parts.push(
+  // Con fondo desenfocado no hay zoompan: re-escalaría el marco pequeño
+  // a W×H y se perdería el contain (los keyframes de zoom no se aplican
+  // en ese modo; la rotación sí, porque mantiene iw/ih).
+  if (needsZP && !containBlur) {
+    geo.push(
       `zoompan=z='${scaleE || '1'}':x='(iw-iw/zoom)/2+(${xE || '0'})':y='(ih-ih/zoom)/2+(${yE || '0'})':d=1:s=${W}x${H}:fps=${fps}`,
     );
   }
+  const geoStr = geo.join(',');
 
   const f = c.filters || {};
   const b = f.brightness ?? 0;
   const co = f.contrast ?? 1;
   const sa = f.saturation ?? 1;
-  if (b !== 0 || co !== 1 || sa !== 1) {
-    parts.push(`eq=brightness=${fmt(b)}:contrast=${fmt(co)}:saturation=${fmt(sa)}`);
+  const eqPart = (b !== 0 || co !== 1 || sa !== 1)
+    ? `,eq=brightness=${fmt(b)}:contrast=${fmt(co)}:saturation=${fmt(sa)}` : '';
+
+  const graph = [];
+  let vLabel = `v${c.idx}`;
+  let needsAlpha = false;
+
+  // Preset de look (Estilo J'K): se aplica tras los sliders de eq y ANTES
+  // del croma/opacidad, porque el Cómic trabaja sobre yuv420p (sin alfa).
+  const preset = (f && f.preset) || 'none';
+  if (preset === 'comic') {
+    // Cómic con DOS entradas del mismo medio (sin split: ver nota arriba).
+    // Rama de color: cadena base + posterizado; rama de bordes: misma
+    // geometría desde la segunda entrada + edgedetect.
+    graph.push(`[${c.inputIdx}:v]${geoStr}${eqPart}[v${c.idx}]`);
+    graph.push(`[${c.edgeInputIdx}:v]${geoStr},${COMIC_EDGE}[cmE${c.idx}]`);
+    graph.push(`[v${c.idx}]${COMIC_FLAT}[cmF${c.idx}]`);
+    graph.push(comicBlend(`cmF${c.idx}`, `cmE${c.idx}`, `v${c.idx}c`));
+    vLabel = `v${c.idx}c`;
+  } else {
+    graph.push(`[${c.inputIdx}:v]${geoStr}${eqPart}[v${c.idx}]`);
+    if (preset === 'bw') {
+      const out = `v${c.idx}bw`;
+      graph.push(`[${vLabel}]hue=s=0,eq=contrast=1.08[${out}]`);
+      vLabel = out;
+    } else if (preset === 'color') {
+      const out = `v${c.idx}col`;
+      graph.push(`[${vLabel}]eq=saturation=1.55:contrast=1.08[${out}]`);
+      vLabel = out;
+    }
   }
 
-  let needsAlpha = false;
+  // Efectos (ola 1): un toque, tras el look y antes del croma/opacidad.
+  const effectFn = (c.effect && EFFECT_FILTERS[c.effect]) || null;
+  if (effectFn) {
+    const out = `v${c.idx}fx`;
+    graph.push(`[${vLabel}]${effectFn(W, H)}[${out}]`);
+    vLabel = out;
+  }
+
   if (c.chroma) {
-    parts.push(`chromakey=${ffColor(c.chroma.color)}:${fmt(c.chroma.similarity ?? 0.15)}:${fmt(c.chroma.blend ?? 0.1)},format=yuva420p`);
+    const out = `v${c.idx}ck`;
+    graph.push(`[${vLabel}]chromakey=${ffColor(c.chroma.color)}:${fmt(c.chroma.similarity ?? 0.15)}:${fmt(c.chroma.blend ?? 0.1)},format=yuva420p[${out}]`);
+    vLabel = out;
     needsAlpha = true;
   }
-  if (opacityNeeded(c.keyframes)) {
+  // Opacidad (ola 3): animada por keyframes o constante por el slider.
+  const constOpacity = (c.opacity ?? 1);
+  const opFromKf = opacityNeeded(c.keyframes);
+  if (opFromKf || constOpacity !== 1) {
     // geq usa T (mayúscula) como tiempo; `t` da "Undefined constant".
     // alpha(X,Y)*OP conserva el alfa de origen (fondo transparente del PNG
     // de texto o zona recortada por el croma); 255*OP lo destruiría y
     // volvería opaco el fondo transparente. La función es alpha(X,Y).
-    const opE = opacityExpr(c.keyframes, 'T');
+    const out = `v${c.idx}op`;
+    const opE = opFromKf ? opacityExpr(c.keyframes, 'T') : `min(max(${fmt(constOpacity)},0),1)`;
     // geq para opacidad animada (colorchannelmixer con aa variable NO funciona).
-    parts.push(`format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(${opE})',format=yuva420p`);
+    graph.push(`[${vLabel}]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(${opE})',format=yuva420p[${out}]`);
+    vLabel = out;
     needsAlpha = true;
   }
+  // Máscara (ola 2): forma con pluma. Fuera de la forma el píxel es
+  // transparente (el segmento lo compone sobre negro). x/y/w/h son
+  // fracciones del lienzo; feather es el ancho de la pluma en px.
+  if (c.mask && c.mask.shape && c.mask.shape !== 'none') {
+    const out = `v${c.idx}mk`;
+    const m = c.mask;
+    const F = Math.max(1, m.feather ?? 12);
+    let alphaE;
+    if (m.shape === 'circle') {
+      const cx = W * ((m.x ?? 0.25) + (m.w ?? 0.5) / 2);
+      const cy = H * ((m.y ?? 0.25) + (m.h ?? 0.5) / 2);
+      const R = Math.min(W * (m.w ?? 0.5), H * (m.h ?? 0.5)) / 2;
+      alphaE = `255*min(max((${fmt(R + F)}-hypot(X-${fmt(cx)},Y-${fmt(cy)}))/${fmt(F)},0),1)`;
+    } else { // rect
+      const x0 = W * (m.x ?? 0.1);
+      const x1 = W * ((m.x ?? 0.1) + (m.w ?? 0.8));
+      const y0 = H * (m.y ?? 0.1);
+      const y1 = H * ((m.y ?? 0.1) + (m.h ?? 0.8));
+      alphaE = `255*min(max((min(min(X-${fmt(x0)},${fmt(x1)}-X),min(Y-${fmt(y0)},${fmt(y1)}-Y))+${fmt(F)})/${fmt(F)},0),1)`;
+    }
+    graph.push(`[${vLabel}]format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='${alphaE}',format=yuva420p[${out}]`);
+    vLabel = out;
+    needsAlpha = true;
+  }
+  // Fondo desenfocado (ola 2): el fondo es el propio clip borroso a cover
+  // y el marco nítido centrado encima. Sale opaco (yuv420p), así que ya no
+  // necesita composición sobre negro.
+  if (containBlur) {
+    const out = `v${c.idx}bg`;
+    graph.push(
+      `[${vLabel}]split[cbA${c.idx}][cbB${c.idx}];`
+      + `[cbA${c.idx}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},gblur=sigma=20[cbBg${c.idx}];`
+      + `[cbB${c.idx}]scale=${W}:${H}:force_original_aspect_ratio=decrease[cbFg${c.idx}];`
+      + `[cbBg${c.idx}][cbFg${c.idx}]overlay=(W-w)/2:(H-h)/2,format=yuv420p[${out}]`,
+    );
+    vLabel = out;
+    needsAlpha = false;
+  }
 
-  return { chain: `${parts.join(',')}[v${c.idx}]`, needsAlpha };
+  return { graph, vLabel, needsAlpha };
 }
 
 // Cadena de audio de un clip. Sin audio en el medio: silencio sintetizado.
@@ -546,6 +744,65 @@ async function _coreUrlAttempts() {
   if (Engine.mode === 'native') return [vendored];
   if (await _urlExists(VENDOR_WASM_URL)) return [vendored, ...CDN_URLS];
   return CDN_URLS;
+}
+
+// Procesa el audio de un medio (vídeo: copia el vídeo; audio: solo audio)
+// con una cadena de filtros de audio y guarda el resultado en la galería.
+async function _audioOp(mediaId, af, suffix, onProgress, opts = {}) {
+  const { name, blob, meta } = await _writeInput(mediaId);
+  const info = await Engine.probe(mediaId);
+  const files = [name];
+  try {
+    if (meta.kind === 'audio') {
+      const outName = _memName('m4a');
+      files.push(outName);
+      await _exec(['-i', name, '-af', af, '-c:a', 'aac', '-b:a', '128k', outName], { onProgress, restore: () => _writeBlob(name, blob) });
+      const out = await _readOutput(outName, 'audio/mp4');
+      return await _saveResult(out, { name: derivedName(meta.name, suffix), kind: 'audio' });
+    }
+    if (meta.kind !== 'video' || !info.hasAudio) throw new Error('Este medio no tiene audio');
+    const outName = _memName('mp4');
+    files.push(outName);
+    // -t explícito cuando se conoce la duración final: el núcleo wasm no
+    // respeta -shortest con -c:v copy (la voz aguda salía con 6 s en vez de ~4 s).
+    const args = ['-i', name, '-af', af, '-map', '0:v', '-map', '0:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k'];
+    if (opts.maxDuration) args.push('-t', String(opts.maxDuration));
+    args.push('-shortest', '-movflags', '+faststart', outName);
+    await _exec(args, { onProgress, restore: () => _writeBlob(name, blob) });
+    const out = await _readOutput(outName, 'video/mp4');
+    return await _saveResult(out, { name: derivedName(meta.name, suffix), kind: 'video' });
+  } finally {
+    await _rmAll(files);
+  }
+}
+
+// Aplica un filtro de vídeo a un medio (imagen: PNG; vídeo: MP4 con el
+// audio copiado) y guarda el resultado en la galería.
+async function _videoFilterOp(mediaId, vf, suffix, onProgress) {
+  const { name, blob, meta } = await _writeInput(mediaId);
+  const files = [name];
+  try {
+    if (meta.kind === 'audio') throw new Error('Los filtros de vídeo no se aplican a un audio');
+    if (meta.kind === 'image') {
+      const outName = _memName('png');
+      files.push(outName);
+      await _exec(['-i', name, '-vf', vf, '-frames:v', '1', outName], { onProgress, restore: () => _writeBlob(name, blob) });
+      const out = await _readOutput(outName, 'image/png');
+      return await _saveResult(out, { name: derivedName(meta.name, suffix), kind: 'image' });
+    }
+    const info = await Engine.probe(mediaId);
+    const outName = _memName('mp4');
+    files.push(outName);
+    const args = ['-i', name, '-filter_complex', `[0:v]${vf}[v]`, '-map', '[v]'];
+    if (info.hasAudio) args.push('-map', '0:a?', '-c:a', 'copy');
+    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+      '-r', '30', '-movflags', '+faststart', outName);
+    await _exec(args, { onProgress, restore: () => _writeBlob(name, blob) });
+    const out = await _readOutput(outName, 'video/mp4');
+    return await _saveResult(out, { name: derivedName(meta.name, suffix), kind: 'video' });
+  } finally {
+    await _rmAll(files);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,7 +913,40 @@ export const Engine = {
       geq: filterNames.has('geq'),
       libx264: encNames.has('libx264'),
       aac: encNames.has('aac'),
+      // Filtros de la receta Cómic (Estilo J'K). `posterize` NO existe en
+      // este core (llegó en FFmpeg 7.1); la receta usa `lutyuv` en su lugar.
+      edgedetect: filterNames.has('edgedetect'),
+      posterize: filterNames.has('posterize'),
+      negate: filterNames.has('negate'),
+      blend: filterNames.has('blend'),
+      hue: filterNames.has('hue'),
+      unsharp: filterNames.has('unsharp'),
+      lutyuv: filterNames.has('lutyuv'),
+      split: filterNames.has('split'),
+      // Filtros de InShot (oleadas 1-3, 12 nov 2026).
+      deshake: filterNames.has('deshake'),
+      reverse: filterNames.has('reverse'),
+      areverse: filterNames.has('areverse'),
+      silencedetect: filterNames.has('silencedetect'),
+      loudnorm: filterNames.has('loudnorm'),
+      afftdn: filterNames.has('afftdn'),
+      hqdn3d: filterNames.has('hqdn3d'),
+      transpose: filterNames.has('transpose'),
+      hflip: filterNames.has('hflip'),
+      vflip: filterNames.has('vflip'),
+      gblur: filterNames.has('gblur'),
+      colorchannelmixer: filterNames.has('colorchannelmixer'),
+      rgbashift: filterNames.has('rgbashift'),
+      noise: filterNames.has('noise'),
+      vibrato: filterNames.has('vibrato'),
+      tremolo: filterNames.has('tremolo'),
+      aecho: filterNames.has('aecho'),
+      asetrate: filterNames.has('asetrate'),
     };
+    // La receta Cómic es viable solo si están todos sus filtros.
+    // (No necesita `split`: las dos ramas leen de entradas separadas.)
+    _caps.comic = _caps.edgedetect && _caps.negate && _caps.blend
+      && _caps.lutyuv && filterNames.has('eq');
     return { ..._caps };
   },
 
@@ -824,6 +1114,46 @@ export const Engine = {
     }
   },
 
+  // Cómic (Estilo J'K): aplica la receta Cómic a un medio y guarda el
+  // resultado en la galería. El medio entra DOS veces (-i duplicado): la
+  // rama de color lee de [0:v] y la de bordes de [1:v]. Con `split` el
+  // Cómic saldría en gris (ver nota en la receta). Si el core no trae los
+  // filtros, lanza {code:'unsupported'} en vez de fingir.
+  async applyComic(mediaId, onProgress) {
+    const caps = await this.getCapabilities();
+    if (!caps.comic) {
+      throw {
+        code: 'unsupported',
+        message: 'Tu motor de vídeo no incluye los filtros del Cómic (edgedetect/blend/lutyuv).',
+      };
+    }
+    const { name, blob, meta } = await _writeInput(mediaId);
+    const files = [name];
+    try {
+      if (meta.kind === 'audio') throw new Error('El Cómic no se aplica a un audio');
+      const graph = `[0:v]${COMIC_FLAT}[cmFq];[1:v]${COMIC_EDGE}[cmEq];${comicBlend('cmFq', 'cmEq', 'v')}`;
+      if (meta.kind === 'image') {
+        const outName = _memName('png');
+        files.push(outName);
+        await _exec(['-i', name, '-i', name, '-filter_complex', graph, '-map', '[v]', '-frames:v', '1', outName], { onProgress });
+        const out = await _readOutput(outName, 'image/png');
+        return await _saveResult(out, { name: derivedName(meta.name, ' - cómic'), kind: 'image' });
+      }
+      const info = await this.probe(mediaId);
+      const outName = _memName('mp4');
+      files.push(outName);
+      const args = ['-i', name, '-i', name, '-filter_complex', graph, '-map', '[v]'];
+      if (info.hasAudio) args.push('-map', '0:a?', '-c:a', 'copy');
+      args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+        '-r', '30', '-movflags', '+faststart', outName);
+      await _exec(args, { onProgress });
+      const out = await _readOutput(outName, 'video/mp4');
+      return await _saveResult(out, { name: derivedName(meta.name, ' - cómic'), kind: 'video' });
+    } finally {
+      await _rmAll(files);
+    }
+  },
+
   async chromaKey(mediaId, { color = '#00ff00', similarity = 0.15, blend = 0.1 } = {}, onProgress) {
     const { name, blob, meta } = await _writeInput(mediaId);
     const info = await this.probe(mediaId);
@@ -953,6 +1283,195 @@ export const Engine = {
     }
   },
 
+  // --- InShot, oleadas 1-3 (12 nov 2026) ---------------------------------
+  // Todas crean un medio NUEVO en la galería (el original no se toca) y
+  // completan su meta con _saveResult (contrato §11).
+
+  // Capturar: extrae el fotograma del segundo t como PNG a la galería.
+  // La congelación usa este mismo fotograma y lo inserta como clip de
+  // imagen de 2 s. N = número de fotograma a 30 fps.
+  async captureFrame(mediaId, timeSec, onProgress) {
+    const { name, blob, meta } = await _writeInput(mediaId);
+    if (meta.kind !== 'video') throw new Error('Capturar solo funciona con vídeos');
+    const files = [name];
+    try {
+      const N = Math.max(0, Math.round((timeSec || 0) * 30));
+      const outName = _memName('png');
+      files.push(outName);
+      await _exec(['-i', name, '-vf', `select='eq(n\\,${N})'`, '-frames:v', '1', outName], { onProgress });
+      const out = await _readOutput(outName, 'image/png');
+      return await _saveResult(out, { name: derivedName(meta.name, ` - fotograma ${fmt(timeSec || 0)}s`), kind: 'image' });
+    } finally {
+      await _rmAll(files);
+    }
+  },
+
+  // Extrae el audio de un medio como WAV 16 kHz mono (lo que pide Whisper).
+  // Lo guarda en la galería como audio y devuelve su id; la app lo sube a
+  // Datar con OpenCode.uploadFile para transcribirlo con faster-whisper.
+  async extractAudioWav(mediaId, onProgress) {
+    const { name, blob, meta } = await _writeInput(mediaId);
+    const info = await this.probe(mediaId);
+    const files = [name];
+    try {
+      if (!info.hasAudio) throw new Error('Este medio no tiene audio');
+      const outName = _memName('wav');
+      files.push(outName);
+      await _exec(['-i', name, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', outName], { onProgress });
+      const out = await _readOutput(outName, 'audio/wav');
+      return await _saveResult(out, { name: derivedName(meta.name, ' - audio 16kHz'), kind: 'audio' });
+    } finally {
+      await _rmAll(files);
+    }
+  },
+
+  // Inverso: el clip al revés (vídeo + audio). En wasm re-codifica todo:
+  // en clips largos tarda; la app avisa si pasa de ~30 s.
+  async reverseClip(mediaId, onProgress) {
+    const { name, blob, meta } = await _writeInput(mediaId);
+    if (meta.kind !== 'video') throw new Error('El inverso solo se aplica a vídeos');
+    const info = await this.probe(mediaId);
+    const files = [name];
+    try {
+      const outName = _memName('mp4');
+      files.push(outName);
+      const args = ['-i', name, '-vf', 'reverse'];
+      if (info.hasAudio) args.push('-af', 'areverse', '-map', '0:v', '-map', '0:a', '-c:a', 'aac', '-b:a', '128k');
+      else args.push('-an');
+      args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+        '-r', '30', '-movflags', '+faststart', outName);
+      await _exec(args, { onProgress });
+      const out = await _readOutput(outName, 'video/mp4');
+      return await _saveResult(out, { name: derivedName(meta.name, ' - inverso'), kind: 'video' });
+    } finally {
+      await _rmAll(files);
+    }
+  },
+
+  // Estabilizar (básico): deshake de una pasada. NO es vidstab (ausente
+  // en este core): calidad inferior y recorta un poco los bordes. La vía
+  // vidstab queda para el futuro motor nativo (stabilize()).
+  async stabilizeDeshake(mediaId, onProgress) {
+    const caps = await this.getCapabilities();
+    if (!caps.deshake) {
+      throw { code: 'unsupported', message: 'Tu motor de vídeo no incluye deshake.' };
+    }
+    const { name, blob, meta } = await _writeInput(mediaId);
+    if (meta.kind !== 'video') throw new Error('La estabilización solo se aplica a vídeos');
+    const info = await this.probe(mediaId);
+    const files = [name];
+    try {
+      const outName = _memName('mp4');
+      files.push(outName);
+      const args = ['-i', name, '-vf', 'deshake', '-map', '0:v'];
+      if (info.hasAudio) args.push('-map', '0:a', '-c:a', 'copy');
+      else args.push('-an');
+      args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+        '-r', '30', '-movflags', '+faststart', outName);
+      await _exec(args, { onProgress });
+      const out = await _readOutput(outName, 'video/mp4');
+      return await _saveResult(out, { name: derivedName(meta.name, ' - estabilizado (básico)'), kind: 'video' });
+    } finally {
+      await _rmAll(files);
+    }
+  },
+
+  // Mejorar voz (aproximación honesta, ola 3): limpieza + nivel, no IA.
+  async enhanceVoice(mediaId, onProgress) {
+    return _audioOp(mediaId, 'highpass=f=80,afftdn=nr=12,loudnorm=I=-16:TP=-1.5:LRA=11', ' - voz mejorada', onProgress);
+  },
+
+  // Efecto de voz (ola 3): presets con asetrate/vibrato/aecho. El cambio
+  // de tono con asetrate cambia también la duración (no hay rubberband
+  // en este core); la app lo dice al aplicarlo.
+  async voiceEffect(mediaId, preset, onProgress) {
+    const AF = {
+      high: 'asetrate=48000*1.5,aresample=48000',
+      low: 'asetrate=48000*0.75,aresample=48000',
+      robot: 'vibrato=f=8:d=0.5,tremolo=f=8:d=0.5',
+      echo: 'aecho=0.8:0.7:60:0.5',
+    }[preset];
+    if (!AF) throw new Error(`Efecto de voz no válido: ${preset}`);
+    const LABEL = { high: 'aguda', low: 'grave', robot: 'robot', echo: 'eco' }[preset];
+    // La voz aguda/grave cambia la duración del audio (×1.5 / ×0.75): se
+    // corta la salida a esa duración (el núcleo wasm ignora -shortest aquí).
+    const FACTOR = { high: 1.5, low: 0.75 }[preset];
+    const opts = {};
+    if (FACTOR) {
+      const info = await this.probe(mediaId);
+      // La salida no puede durar más que el vídeo: la grave alarga el audio
+      // (6 s → 8 s) pero el vídeo manda (6 s).
+      if (info.duration) opts.maxDuration = Math.round(Math.min(info.duration / FACTOR, info.duration) * 100) / 100;
+    }
+    return _audioOp(mediaId, AF, ` - voz ${LABEL}`, onProgress, opts);
+  },
+
+  // Suavizar (aproximación honesta, ola 3): reduce ruido, piel más lisa.
+  async smoothClip(mediaId, onProgress) {
+    return _videoFilterOp(mediaId, 'hqdn3d=1.5:1.5:6:6', ' - suavizado', onProgress);
+  },
+
+  // Mejorar (aproximación honesta, ola 3): nitidez + color + poco ruido.
+  async enhanceClip(mediaId, onProgress) {
+    return _videoFilterOp(mediaId, 'unsharp=5:5:1.0,eq=contrast=1.05:saturation=1.1,hqdn3d=1:1:3:3', ' - mejorado', onProgress);
+  },
+
+  // Corte automático (aproximación honesta, ola 3): quita los silencios
+  // del clip (silencedetect) y concatena lo que queda. Si no hay
+  // silencios, error honesto. Etiqueta en la UI: «Corte automático
+  // (silencios)», nunca «IA».
+  async autoCut(mediaId, onProgress) {
+    const { name, blob, meta } = await _writeInput(mediaId);
+    if (meta.kind !== 'video') throw new Error('El corte automático solo se aplica a vídeos');
+    const info = await this.probe(mediaId);
+    if (!info.hasAudio) throw new Error('El corte automático necesita audio para detectar silencios');
+    const dur = info.duration || 0;
+    if (!(dur > 0)) throw new Error('No se pudo determinar la duración del clip');
+    const files = [name];
+    try {
+      const { lines } = await _exec(['-i', name, '-af', 'silencedetect=noise=-35dB:d=0.5', '-f', 'null', '-'], { ignoreError: true, onProgress: onProgress ? (p) => onProgress(p * 0.4) : null });
+      const silences = [];
+      let cur = null;
+      for (const line of lines) {
+        let m = line.match(/silence_start:\s*([\d.]+)/);
+        if (m) { cur = { start: parseFloat(m[1]) }; continue; }
+        m = line.match(/silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)/);
+        if (m && cur) { silences.push({ start: cur.start, end: parseFloat(m[1]) }); cur = null; }
+      }
+      if (cur) silences.push({ start: cur.start, end: dur }); // silencio hasta el final
+      if (!silences.length) throw new Error('No se detectaron silencios en este clip');
+      // Invertir: quedarse con lo que NO es silencio (mín. 0.3 s por tramo).
+      const keep = [];
+      let pos = 0;
+      for (const s of silences) {
+        if (s.start - pos >= 0.3) keep.push([pos, s.start]);
+        pos = Math.max(pos, s.end);
+      }
+      if (dur - pos >= 0.3) keep.push([pos, dur]);
+      if (!keep.length) throw new Error('El clip es casi todo silencio: no queda nada que guardar');
+      const graph = [];
+      const ioParts = [];
+      keep.forEach(([S, E], i) => {
+        graph.push(`[0:v]trim=start=${fmt(S)}:end=${fmt(E)},setpts=PTS-STARTPTS,fps=30[v${i}]`);
+        graph.push(`[0:a]atrim=start=${fmt(S)}:end=${fmt(E)},asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo,aresample=48000[a${i}]`);
+        // concat exige vídeo y audio INTERCALADOS por tramo: [v0][a0][v1][a1]…
+        ioParts.push(`[v${i}][a${i}]`);
+      });
+      graph.push(`${ioParts.join('')}concat=n=${keep.length}:v=1:a=1[vout][aout]`);
+      const outName = _memName('mp4');
+      files.push(outName);
+      const args = ['-i', name, '-filter_complex', graph.join(';'), '-map', '[vout]', '-map', '[aout]',
+        '-c:a', 'aac', '-b:a', '128k',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+        '-r', '30', '-movflags', '+faststart', outName];
+      await _exec(args, { onProgress: onProgress ? (p) => onProgress(0.4 + p * 0.6) : null });
+      const out = await _readOutput(outName, 'video/mp4');
+      return await _saveResult(out, { name: derivedName(meta.name, ' - corte automático'), kind: 'video' });
+    } finally {
+      await _rmAll(files);
+    }
+  },
+
   async composeClone(mediaIdA, mediaIdB, { divider = 0.5 } = {}, onProgress) {
     const DIV = clamp(divider, 0.1, 0.9);
     const inA = await _writeInput(mediaIdA);
@@ -1023,19 +1542,36 @@ export const Engine = {
     const bold = opts.bold !== false;
     const italic = !!opts.italic;
     const S = 2; // factor 2x
-    const fontPx = size * S;
-    const padX = Math.ceil(size * 0.35) * S;
-    const padY = Math.ceil(size * 0.3) * S;
+    let fontPx = size * S;
+    let padX = Math.ceil(size * 0.35) * S;
+    let padY = Math.ceil(size * 0.3) * S;
     const lines = String(text).split('\n');
-    const font = `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${fontPx}px system-ui, -apple-system, 'Segoe UI', sans-serif`;
+    const fontFor = (px) => `${italic ? 'italic ' : ''}${bold ? 'bold ' : ''}${px}px system-ui, -apple-system, 'Segoe UI', sans-serif`;
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    ctx.font = font;
     let maxW = 0;
-    for (const line of lines) {
-      const w = ctx.measureText(line).width;
-      if (w > maxW) maxW = w;
+    const measure = () => {
+      ctx.font = fontFor(fontPx);
+      maxW = 0;
+      for (const line of lines) {
+        const w = ctx.measureText(line).width;
+        if (w > maxW) maxW = w;
+      }
+      return maxW;
+    };
+    measure();
+    // Ajuste al ancho: en un lienzo vertical (406 px) una letra larga a
+    // tamaño grande se cortaría por los lados; con opts.maxWidth (ancho
+    // lógico en px) la fuente se reduce hasta que el PNG quepa, en vez de
+    // recortarse. Sin maxWidth el comportamiento no cambia.
+    const maxWLogical = opts.maxWidth || 0;
+    while (maxWLogical > 0 && (maxW + padX * 2) / S > maxWLogical && fontPx > 24) {
+      fontPx = Math.max(24, Math.floor(fontPx * 0.9));
+      padX = Math.ceil((fontPx / S) * 0.35) * S;
+      padY = Math.ceil((fontPx / S) * 0.3) * S;
+      measure();
     }
+    const font = fontFor(fontPx);
     const lineH = fontPx * 1.25;
     canvas.width = Math.max(1, Math.ceil(maxW) + padX * 2);
     canvas.height = Math.max(1, Math.ceil(lineH * lines.length) + padY * 2);
@@ -1068,11 +1604,42 @@ export const Engine = {
     return blob;
   },
 
+  // Emoji como PNG transparente (adhesivos, ola 1): un emoji es texto con
+  // fuente grande y fondo transparente — mismo patrón que renderTextPNG,
+  // sin assets externos. sizePx es el tamaño lógico (el PNG sale a 2x).
+  async renderEmojiPNG(emoji, sizePx = 256) {
+    if (!emoji || !String(emoji).trim()) throw new Error('renderEmojiPNG: emoji vacío');
+    const S = 2; // factor 2x
+    const fontPx = sizePx * S;
+    const font = `${fontPx}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",system-ui,sans-serif`;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.font = font;
+    const w = Math.ceil(ctx.measureText(emoji).width);
+    canvas.width = Math.max(1, w + fontPx);
+    canvas.height = Math.max(1, Math.ceil(fontPx * 1.3));
+    ctx.font = font;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(emoji, canvas.width / 2, canvas.height / 2);
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('No se pudo generar el PNG del emoji'))),
+        'image/png',
+      );
+    });
+    return blob;
+  },
+
   // --- Exportación de la línea de tiempo — contrato §6 ---------------------
 
   async exportTimeline(project, onProgress) {
     if (!project || !Array.isArray(project.clips) || project.clips.length === 0) {
       throw new Error('El proyecto no tiene clips para exportar');
+    }
+    // Huecos de la Plantilla J'K sin rellenar: error claro, no exportar a medias.
+    if (project.clips.some((c) => c.placeholder || !c.mediaId)) {
+      throw new Error('El proyecto tiene huecos sin rellenar (Plantilla J\'K): elige un clip de la galería para cada hueco antes de exportar.');
     }
     await _ensureLoaded();
     const fps = project.fps || FPS_DEFAULT;
@@ -1100,14 +1667,38 @@ export const Engine = {
           keyframes: clip.keyframes || [],
           volume: clip.volume ?? 1,
           hasAudio: meta.kind === 'video' ? !!info.hasAudio : false,
+          // InShot (12 nov 2026): efecto, giro/volteo, recorte, fondo/lona,
+          // opacidad y máscara por clip.
+          effect: clip.effect || 'none',
+          rotate: clip.rotate || 0,
+          flipH: !!clip.flipH,
+          flipV: !!clip.flipV,
+          crop: clip.crop || null,
+          fit: clip.fit || 'cover',
+          bg: clip.bg || 'black',
+          bgColor: clip.bgColor || '#000000',
+          opacity: clip.opacity ?? 1,
+          mask: clip.mask || null,
         };
         c.D = clipDuration(c, info);
         clips.push(c);
       }
 
+      // Entradas extra del Cómic: una segunda copia del medio por cada clip
+      // con preset 'comic'. La rama de bordes lee de ahí (sin split: con
+      // split el Cómic saldría en gris — ver nota en la receta). Van tras
+      // las entradas principales, así que audioBase es files.length.
+      for (const c of clips) {
+        if ((c.filters && c.filters.preset) === 'comic') {
+          const edge = await _writeInput(c.mediaId);
+          files.push(edge.name);
+          c.edgeInputIdx = files.length - 1;
+        }
+      }
+
       // 2) Entradas: audios de la pista de audio.
       const audios = [];
-      const audioBase = clips.length;
+      const audioBase = files.length;
       for (let j = 0; j < (project.audios || []).length; j++) {
         const a = project.audios[j];
         const { name, meta } = await _writeInput(a.mediaId);
@@ -1133,7 +1724,8 @@ export const Engine = {
         const start = t.start || 0;
         const end = t.end ?? start + 3;
         if (!(end > start)) continue; // texto sin duración visible: se omite
-        const png = await this.renderTextPNG(t.text, t);
+        // maxWidth: la letra se ajusta al lienzo en vez de cortarse por los lados.
+        const png = await this.renderTextPNG(t.text, { ...t, maxWidth: W - 16 });
         const size = await _pngSize(png);
         const name = _memName('png');
         await _writeBlob(name, png);
@@ -1149,17 +1741,70 @@ export const Engine = {
 
       const hasAnyAudio = clips.some((c) => c.hasAudio) || audios.length > 0;
 
+      // 3b) Entradas: PIP (overlays) y adhesivos (stickers). Los PIP son
+      // vídeos/imágenes de la galería, en silencio; los adhesivos son
+      // emojis (PNG por canvas) o imágenes de la galería.
+      const overlays = [];
+      const overlayBase = textBase + texts.length;
+      for (let n = 0; n < (project.overlays || []).length; n++) {
+        const o = project.overlays[n];
+        const { name, meta } = await _writeInput(o.mediaId);
+        files.push(name);
+        const info = await this.probe(o.mediaId);
+        overlays.push({
+          idx: n, inputIdx: overlayBase + n, kind: meta.kind,
+          start: o.start || 0, end: o.end ?? (o.start || 0) + 3,
+          x: o.x ?? 0.8, y: o.y ?? 0.2, w: o.w ?? 0.25,
+          // El alto del PIP sale de su aspecto (no se estira al lienzo).
+          aspect: (info.width && info.height) ? info.height / info.width : 1,
+          opacity: o.opacity ?? 1,
+        });
+      }
+      const stickers = [];
+      const stickerBase = overlayBase + overlays.length;
+      for (let q = 0; q < (project.stickers || []).length; q++) {
+        const s = project.stickers[q];
+        const start = s.start || 0;
+        const end = s.end ?? start + 3;
+        if (!(end > start)) continue; // adhesivo sin duración visible: se omite
+        let name;
+        let dispW;
+        let dispH;
+        if (s.emoji) {
+          const png = await this.renderEmojiPNG(s.emoji, 256);
+          const size = await _pngSize(png);
+          name = _memName('png');
+          await _writeBlob(name, png);
+          files.push(name);
+          dispW = Math.floor(size.w / 2);
+          dispH = Math.floor(size.h / 2);
+        } else if (s.mediaId) {
+          const w = await _writeInput(s.mediaId);
+          name = w.name;
+          files.push(name);
+          const info = await this.probe(s.mediaId);
+          dispW = info.width || 200;
+          dispH = info.height || 200;
+        } else continue;
+        // inputIdx = posición real en files[] (los omitidos no cuentan).
+        stickers.push({
+          idx: stickers.length, inputIdx: stickerBase + stickers.length,
+          start, end, x: s.x ?? 0.5, y: s.y ?? 0.5,
+          scale: s.scale ?? 1, dispW, dispH,
+        });
+      }
+
       // 4) Grafo.
       const graph = [];
       const segments = [];
       for (const c of clips) {
-        const { chain, needsAlpha } = buildClipVideoFilter(c, W, H, fps);
-        graph.push(chain);
-        let vLabel = `v${c.idx}`;
+        const { graph: clipGraph, vLabel: clipVLabel, needsAlpha } = buildClipVideoFilter(c, W, H, fps);
+        graph.push(...clipGraph);
+        let vLabel = clipVLabel;
         if (needsAlpha) {
           graph.push(
             `color=c=black:s=${W}x${H}:r=${fps}:d=${fmt(c.D)}[bg${c.idx}];`
-            + `[bg${c.idx}][v${c.idx}]overlay=0:0:shortest=1[v${c.idx}s]`,
+            + `[bg${c.idx}][${vLabel}]overlay=0:0:shortest=1[v${c.idx}s]`,
           );
           vLabel = `v${c.idx}s`;
         }
@@ -1201,6 +1846,32 @@ export const Engine = {
         vcur = vout;
       }
 
+      // 5b) PIP y adhesivos sobre el vídeo encadenado. Los PIP van en
+      // silencio (sin audio); su vídeo arranca en o.start. Las posiciones
+      // x/y son el CENTRO en fracciones del lienzo; w/h del PIP también.
+      for (const o of overlays) {
+        const ow = Math.max(2, Math.round(W * o.w));
+        const oh = Math.max(2, Math.round(ow * (o.aspect || 1)));
+        let chain = `[${o.inputIdx}:v]fps=${fps},setpts=PTS-STARTPTS+${fmt(o.start)},scale=${ow}:${oh}`;
+        if (o.kind === 'image') chain = `[${o.inputIdx}:v]fps=${fps},setpts=PTS+${fmt(o.start)},scale=${ow}:${oh}`;
+        if (o.opacity !== 1) chain += `,format=yuva420p,colorchannelmixer=aa=${fmt(o.opacity)}`;
+        chain += `[ov${o.idx}]`;
+        graph.push(chain);
+        const vout = `vov${o.idx}`;
+        graph.push(`[${vcur}][ov${o.idx}]overlay=x='W*${fmt(o.x)}-w/2':y='H*${fmt(o.y)}-h/2':enable='between(t,${fmt(o.start)},${fmt(o.end)})'[${vout}]`);
+        vcur = vout;
+      }
+      for (const s of stickers) {
+        const sw = Math.max(2, Math.floor((s.dispW * s.scale) / 2) * 2);
+        const sh = Math.max(2, Math.floor((s.dispH * s.scale) / 2) * 2);
+        graph.push(`[${s.inputIdx}:v]fps=${fps},setpts=PTS+${fmt(s.start)},format=rgba,scale=${sw}:${sh}[stk${s.idx}]`);
+        const X = `W*${fmt(s.x)}-${fmt(sw / 2)}`;
+        const Y = `H*${fmt(s.y)}-${fmt(sh / 2)}`;
+        const vout = `vstk${s.idx}`;
+        graph.push(`[${vcur}][stk${s.idx}]overlay=x='${X}':y='${Y}':enable='between(t,${fmt(s.start)},${fmt(s.end)})'[${vout}]`);
+        vcur = vout;
+      }
+
       // 6) Mezcla de audio — contrato §6.5.
       let aout = null;
       if (hasAnyAudio) {
@@ -1224,8 +1895,20 @@ export const Engine = {
         if (c.kind === 'image') args.push('-loop', '1', '-t', fmt(c.D));
         args.push('-i', files[c.inputIdx]);
       }
+      // Entradas extra del Cómic, en el mismo orden que en files[].
+      for (const c of clips) {
+        if (c.edgeInputIdx != null) {
+          if (c.kind === 'image') args.push('-loop', '1', '-t', fmt(c.D));
+          args.push('-i', files[c.edgeInputIdx]);
+        }
+      }
       for (const a of audios) args.push('-i', files[a.inputIdx]);
       for (const t of texts) args.push('-loop', '1', '-t', fmt(t.end - t.start), '-i', files[t.inputIdx]);
+      for (const o of overlays) {
+        if (o.kind === 'image') args.push('-loop', '1', '-t', fmt(o.end - o.start));
+        args.push('-i', files[o.inputIdx]);
+      }
+      for (const s of stickers) args.push('-loop', '1', '-t', fmt(s.end - s.start), '-i', files[s.inputIdx]);
 
       const outName = _memName('mp4');
       files.push(outName);
