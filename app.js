@@ -257,6 +257,10 @@ const state = {
 const app = {
   get project() { return state.project; },
   get selection() { return state.selection; },
+  get playhead() { return state.playhead; },
+  get playing() { return state.playing; },
+  renderInspector,
+  updatePreview,
   showScreen,
   saveProject,
   refreshAll,
@@ -525,23 +529,26 @@ $('#file-upload').addEventListener('change', async e => {
 
 async function addMediaToTimeline(m) {
   if (!state.project) { toast('Abre primero un proyecto en el Editor.', 'error'); return; }
-  // Rellenar un hueco de la Plantilla J'K: si el clip seleccionado es un
-  // hueco, el medio elegido lo rellena en vez de añadirse como clip nuevo.
-  // El look y la duración del hueco se conservan.
+  // Rellenar o cambiar un hueco de la Plantilla J'K: si el clip seleccionado
+  // es un hueco (vacío o ya rellenado — lleva el marcador slot 'bts'/'final'),
+  // el medio elegido lo rellena o lo cambia en vez de añadirse como clip
+  // nuevo. El look y la duración del hueco se conservan.
   if (m.kind !== 'audio' && state.selection && state.selection.track === 'video') {
     const sel = selectedItem();
-    if (sel && sel.item && sel.item.placeholder) {
+    if (sel && sel.item && (sel.item.placeholder || sel.item.slot)) {
       const c = sel.item;
-      const slotName = c.name || 'hueco';
+      const wasPlaceholder = !!c.placeholder;
+      const slotName = c.slot === 'bts' ? '① Crudo / BTS' : c.slot === 'final' ? '② Final' : (c.name || 'hueco');
       c.mediaId = m.id;
       c.kind = m.kind;
       c.name = m.name;
       c.placeholder = false;
-      delete c.slot;
       state.clipDurations.delete(c.id);
       await saveProject(true);
       await renderEditor();
-      toast('Hueco «' + slotName + '» rellenado con «' + m.name + '».', 'success', 3000);
+      toast(wasPlaceholder
+        ? 'Hueco «' + slotName + '» rellenado con «' + m.name + '».'
+        : 'Hueco «' + slotName + '» cambiado a «' + m.name + '».', 'success', 3000);
       return;
     }
   }
@@ -577,7 +584,13 @@ function trackItemEls(track, items, clsFn, labelFn, durFn) {
     const ds = document.createElement('span'); ds.className = 'clip-dur'; ds.textContent = fmtTime(dur);
     el.appendChild(ds);
     if (state.selection && state.selection.track === track && state.selection.id === it.id) el.classList.add('selected');
-    el.addEventListener('click', () => {
+    // 'mousedown' (no 'click'): renderTimeline() reconstruye la pista en
+    // cada edición y puede resolver entre el mousedown y el mouseup de un
+    // clic, con lo que el nodo bajo el cursor se destruye y el 'click'
+    // nunca llega (el clip no se selecciona). Al seleccionar en el
+    // mousedown, la selección ya está hecha aunque el nodo se reconstruya
+    // después.
+    el.addEventListener('mousedown', () => {
       state.selection = { track, id: it.id };
       renderTimeline(); renderInspector();
     });
@@ -705,6 +718,41 @@ $('#btn-move-right').addEventListener('click', () => moveSelected(1));
 /* ---------- Vista previa ---------- */
 let previewRaf = null;
 let previewClipId = null;
+let previewLastTick = 0;
+// El usuario mueve el cursor (barra de progreso / flechas): la vista previa
+// debe saltar al nuevo punto aunque esté reproduciendo.
+let previewForceSeek = false;
+
+/* Filtro CSS en vivo para la vista previa: aproxima el eq de FFmpeg
+   (brillo -1..1 como desplazamiento, contraste y saturación como
+   multiplicadores, 1 = neutro) y los looks J'K. El Cómic no tiene
+   equivalente exacto en CSS (no hay detección de bordes): la vista previa
+   muestra colores planos e intensos y el efecto completo con contornos se
+   aplica al exportar. */
+function previewFilterCSS(c) {
+  const f = (c && c.filters) || {};
+  const parts = [];
+  const preset = f.preset || 'none';
+  if (preset === 'bw') parts.push('grayscale(1)', 'contrast(1.08)');
+  else if (preset === 'color') parts.push('saturate(1.55)', 'contrast(1.08)');
+  else if (preset === 'comic') parts.push('contrast(1.25)', 'saturate(1.9)', 'brightness(1.02)');
+  const b = f.brightness ?? 0, ct = f.contrast ?? 1, st = f.saturation ?? 1;
+  if (b) parts.push('brightness(' + (1 + b).toFixed(2) + ')');
+  if (ct !== 1) parts.push('contrast(' + ct.toFixed(2) + ')');
+  if (st !== 1) parts.push('saturate(' + st.toFixed(2) + ')');
+  return parts.join(' ');
+}
+// Clip activo según el cursor + su instante de inicio en la línea.
+function clipAtTime(t) {
+  const p = state.project;
+  let cur = p.clips[0], start = 0;
+  for (const c of p.clips) {
+    const d = clipDuration(c);
+    if (t < start + d || c === p.clips[p.clips.length - 1]) return { clip: c, start };
+    start += d;
+  }
+  return { clip: cur, start };
+}
 async function updatePreview() {
   const p = state.project;
   const videoEl = $('#preview-video');
@@ -712,6 +760,7 @@ async function updatePreview() {
   const emptyEl = $('#preview-empty');
   if (!p || !p.clips.length) {
     videoEl.removeAttribute('src'); videoEl.load();
+    videoEl.style.filter = ''; imgEl.style.filter = '';
     imgEl.hidden = true; videoEl.hidden = true;
     emptyEl.textContent = 'Añade un clip desde la galería para verlo aquí.';
     emptyEl.style.display = 'flex';
@@ -719,14 +768,12 @@ async function updatePreview() {
     return;
   }
   emptyEl.style.display = 'none';
-  // clip activo según el cursor
-  let t = state.playhead, cur = p.clips[0], start = 0;
-  for (const c of p.clips) {
-    const d = clipDuration(c);
-    if (t < start + d || c === p.clips[p.clips.length - 1]) { cur = c; break; }
-    start += d;
-  }
-  const offset = Math.max(0, t - start);
+  const { clip: cur, start } = clipAtTime(state.playhead);
+  const offset = Math.max(0, state.playhead - start);
+  // El filtro se aplica al instante, antes de cargar el medio: así los
+  // deslizadores y el look se ven en vivo aunque el medio tarde.
+  const cssFilter = previewFilterCSS(cur);
+  videoEl.style.filter = cssFilter; imgEl.style.filter = cssFilter;
   // Hueco de la Plantilla J'K: no hay medio que mostrar, solo el aviso
   // (las letras y la cuenta atrás sí se ven encima del hueco).
   if (cur.placeholder) {
@@ -749,8 +796,14 @@ async function updatePreview() {
       previewClipId = cur.id;
       await new Promise(res => { videoEl.onloadedmetadata = res; setTimeout(res, 1500); });
     }
+    // Mientras reproduce, el vídeo manda y no se le rebusca: el cursor
+    // sigue su reloj (ver tickPreview). Solo se busca al pausar o cuando
+    // el usuario mueve el cursor a propósito.
     const mediaTime = (cur.trimStart || 0) + offset * (cur.speed || 1);
-    if (Math.abs(videoEl.currentTime - mediaTime) > 0.4) videoEl.currentTime = Math.min(mediaTime, (videoEl.duration || mediaTime) - 0.05);
+    if ((!state.playing || previewForceSeek) && Math.abs(videoEl.currentTime - mediaTime) > 0.4) {
+      videoEl.currentTime = Math.min(mediaTime, (videoEl.duration || mediaTime) - 0.05);
+    }
+    previewForceSeek = false;
     videoEl.playbackRate = cur.speed || 1;
     videoEl.volume = Math.min(1, cur.volume ?? 1);
     if (state.playing) videoEl.play().catch(() => {});
@@ -784,10 +837,27 @@ function renderPreviewTexts() {
   }
 }
 function tickPreview() {
-  if (!state.playing || !state.project) { previewRaf = null; return; }
+  if (!state.playing || !state.project) { previewRaf = null; previewLastTick = 0; return; }
   const total = projectDuration();
-  state.playhead += 1 / 30;
-  if (state.playhead >= total) { state.playing = false; state.playhead = total; $('#btn-play-pause').textContent = '▶'; }
+  const now = performance.now();
+  const videoEl = $('#preview-video');
+  const { clip: cur, start } = clipAtTime(state.playhead);
+  // El vídeo manda: el cursor sigue el reloj del propio elemento <video>,
+  // no un temporizador aparte (el temporizador se retrasaba y el vídeo se
+  // rebuscaba cada poco, por eso iba lento y a trompicones).
+  const isVideo = cur && cur.kind === 'video' && !cur.placeholder && videoEl.getAttribute('src') && !videoEl.hidden;
+  if (isVideo) {
+    if (videoEl.ended) state.playhead = Math.min(total, start + clipDuration(cur));
+    else state.playhead = Math.min(total, start + Math.max(0, (videoEl.currentTime - (cur.trimStart || 0)) / (cur.speed || 1)));
+  } else if (previewLastTick) {
+    // Imagen o hueco: no hay reloj de vídeo; avanzar por tiempo real.
+    state.playhead = Math.min(total, state.playhead + (now - previewLastTick) / 1000);
+  }
+  previewLastTick = now;
+  if (state.playhead >= total) {
+    state.playing = false; state.playhead = total; previewLastTick = 0;
+    $('#btn-play-pause').textContent = '▶';
+  }
   renderTimeline();
   updatePreview();
   previewRaf = setTimeout(() => requestAnimationFrame(tickPreview), 1000 / 30);
@@ -797,19 +867,20 @@ $('#btn-play-pause').addEventListener('click', () => {
   if (state.playhead >= projectDuration()) state.playhead = 0;
   state.playing = !state.playing;
   $('#btn-play-pause').textContent = state.playing ? '⏸' : '▶';
-  if (state.playing) tickPreview();
+  if (state.playing) { previewLastTick = 0; tickPreview(); }
   else { if (previewRaf) clearTimeout(previewRaf); $('#preview-video').pause(); }
 });
 $('#progress-bar').addEventListener('click', e => {
   const rect = e.currentTarget.getBoundingClientRect();
   const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
   state.playhead = frac * projectDuration();
+  previewForceSeek = true;
   renderTimeline(); updatePreview();
 });
 $('#progress-bar').addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') state.playhead = Math.max(0, state.playhead - 1);
   if (e.key === 'ArrowRight') state.playhead = Math.min(projectDuration(), state.playhead + 1);
-  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { renderTimeline(); updatePreview(); }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { previewForceSeek = true; renderTimeline(); updatePreview(); }
 });
 
 /* ---------- Inspector ---------- */
@@ -900,7 +971,7 @@ function renderClipInspector(body, actions, c) {
     none: 'Sin look: el clip se ve tal cual.',
     bw: 'Blanco y negro con contraste: plano exterior desaturado, estilo J\'K.',
     color: 'Color intenso y saturado: plano cercano con punch, estilo J\'K.',
-    comic: 'Cómic: colores planos + contornos negros (bordes + posterizado). Se aplica al exportar.',
+    comic: 'Cómic: colores planos + contornos negros. En la vista previa se ve una aproximación (color plano e intenso, sin contornos); el efecto completo se aplica al exportar.',
   };
   lookNote.textContent = lookNotes[(c.filters && c.filters.preset) || 'none'] || lookNotes.none;
   lookSel.addEventListener('change', () => {
@@ -1046,6 +1117,7 @@ function renderTextInspector(body, actions, t) {
   body.appendChild(yb);
   const textLab = document.createElement('label'); textLab.textContent = 'Texto';
   const textInp = document.createElement('input'); textInp.type = 'text'; textInp.value = t.text || '';
+  textInp.addEventListener('input', () => { t.text = textInp.value; refreshEditorAfterEdit(); renderTimeline(); });
   textInp.addEventListener('change', () => { t.text = textInp.value; refreshEditorAfterEdit(); renderTimeline(); });
   textLab.appendChild(textInp); body.appendChild(textLab);
   const grid = document.createElement('div'); grid.className = 'field-grid';
@@ -1669,10 +1741,35 @@ async function createJKTemplate() {
     yellowLyricsText('AL BERRO', 11, 15),
   ];
   p.audios = [];
+  // Si la galería ya tiene vídeos, los huecos se rellenan con vídeos reales
+  // (los más recientes primero) para que la plantilla nunca se vea vacía:
+  // el primero en crudo y el segundo con el look Cómic; con un solo vídeo,
+  // los dos huecos usan el mismo (crudo + edit final, como hace J'K).
+  // La duración y el look de cada hueco se conservan, y el marcador slot
+  // ('bts'/'final') también: el hueco sigue siendo el hueco ①/② y se puede
+  // cambiar después tocándolo y eligiendo otro vídeo de la galería.
+  let galleryVideos = [];
+  try { galleryVideos = await Storage.listMedia('video'); } catch {}
+  const fillSlot = (slot, media) => {
+    slot.mediaId = media.id;
+    slot.kind = media.kind;
+    slot.name = media.name;
+    slot.placeholder = false;
+  };
+  if (galleryVideos.length) {
+    fillSlot(p.clips[0], galleryVideos[0]);
+    fillSlot(p.clips[1], galleryVideos[1] || galleryVideos[0]);
+  }
   try {
     await Storage.saveProject(p);
-    toast('Plantilla J\'K creada: toca cada hueco y elige tu clip de la galería.', 'success', 8000);
     await openProject(p.id);
+    // El primer hueco queda seleccionado para que se vea qué es y se pueda
+    // cambiar tocando otro vídeo de la galería.
+    state.selection = { track: 'video', id: p.clips[0].id };
+    renderTimeline(); renderInspector(); updatePreview();
+    toast(galleryVideos.length
+      ? 'Plantilla J\'K creada con tus vídeos: el primero en crudo y el segundo con el look Cómic. Toca un hueco y elige otro de la galería para cambiarlo.'
+      : 'Plantilla J\'K creada con huecos vacíos: toca un vídeo de la galería para rellenar el primer hueco.', 'success', 8000);
   } catch (e) { toast('No se pudo crear la plantilla: ' + errMsg(e), 'error'); }
 }
 
@@ -1685,7 +1782,7 @@ async function applyLookJK() {
     c.filters.preset = i % 2 === 0 ? 'bw' : 'color';
   });
   await saveProject(true);
-  renderTimeline(); renderInspector();
+  renderTimeline(); renderInspector(); updatePreview();
   toast('Look J\'K aplicado: B/N y color intenso alternos' + (kept ? ' (el Cómic se respeta).' : '.'), 'success', 5000);
 }
 
@@ -1697,8 +1794,8 @@ async function applyComicToSelected() {
   c.filters = c.filters || { brightness: 0, contrast: 1, saturation: 1 };
   c.filters.preset = 'comic';
   await saveProject(true);
-  renderTimeline(); renderInspector();
-  toast('Cómic aplicado al clip «' + (c.name || '') + '». Se verá al exportar.', 'success', 4000);
+  renderTimeline(); renderInspector(); updatePreview();
+  toast('Cómic aplicado al clip «' + (c.name || '') + '». Se ve en la vista previa (aproximación) y completo al exportar.', 'success', 4000);
 }
 
 $('#btn-jk-template').addEventListener('click', createJKTemplate);
