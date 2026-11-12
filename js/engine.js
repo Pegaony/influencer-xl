@@ -200,7 +200,10 @@ function _lastLogLines(n) {
 }
 
 async function _ensureLoaded() {
-  if (Engine.mode === 'native') {
+  // En v1 no existe ningún plugin nativo VideoEditor: el motor wasm es el
+  // motor en la web Y en el APK. El error solo salta si algún día existe
+  // el plugin pero el motor nativo sigue sin implementarse.
+  if (Engine.mode === 'native' && typeof window !== 'undefined' && window.Capacitor?.Plugins?.VideoEditor) {
     throw {
       code: 'unsupported',
       message: 'El motor nativo (plugin Capacitor VideoEditor) no está implementado en esta fase; usa la versión web.',
@@ -551,9 +554,13 @@ async function _coreUrlAttempts() {
 
 export const Engine = {
   get mode() {
-    return (typeof window !== 'undefined' && window.Capacitor?.Plugins?.VideoEditor)
-      ? 'native'
-      : 'web';
+    // Capacitor inyecta window.Capacitor con isNativePlatform() en el
+    // WebView del APK. En el navegador no existe y el modo es 'web'.
+    try {
+      return (typeof window !== 'undefined' && window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform())
+        ? 'native'
+        : 'web';
+    } catch { return 'web'; }
   },
 
   get ready() {
