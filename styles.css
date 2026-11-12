@@ -128,9 +128,14 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .editor-layout {
   display: grid; gap: 1rem; align-items: start;
   grid-template-columns: 300px 1fr;
-  grid-template-areas: "center center" "toolbar toolbar" "media inspector";
+  /* La vista previa debe seguir visible mientras se trabaja en los paneles:
+     el centro (vista previa + línea de tiempo) ocupa la columna derecha en
+     las dos filas de paneles, así su caja es alta y la vista previa puede
+     quedarse fija (sticky) dentro de ella mientras se baja a Medios o al
+     Inspector. En el teléfono se apila como antes. */
+  grid-template-areas: "media center" "inspector center" "toolbar toolbar";
 }
-.editor-center { grid-area: center; width: 100%; max-width: 880px; margin: 0 auto; justify-self: center; }
+.editor-center { grid-area: center; width: 100%; max-width: 880px; margin: 0 auto; justify-self: center; align-self: stretch; }
 .editor-toolbar {
   grid-area: toolbar; position: sticky; bottom: 0; z-index: 20;
   display: flex; gap: .45rem; overflow-x: auto; padding: .6rem;
@@ -163,10 +168,25 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .icon-btn { background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: .2rem .45rem; cursor: pointer; font-size: .8rem; }
 .icon-btn:hover { border-color: var(--danger); color: #fca5a5; }
 
-.preview-wrap { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: .8rem; margin-bottom: 1rem; }
+.preview-wrap {
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .8rem; margin-bottom: 1rem;
+  /* Vista previa fija: se queda arriba mientras se trabaja en la línea de
+     tiempo, la galería o el inspector (el centro es alto porque abarca las
+     dos filas de paneles). Fondo opaco para que no se transparente el
+     contenido al bajar. */
+  position: sticky; top: 64px; z-index: 30;
+}
 .preview-stage {
   position: relative; margin: 0 auto; background: #000; border-radius: 8px;
-  overflow: hidden; aspect-ratio: 9 / 16; max-height: 62vh;
+  overflow: hidden; aspect-ratio: 9 / 16; max-height: 52vh;
+}
+/* La vista previa es fija arriba y la barra es fija abajo: si la vista
+   previa es demasiado alta, la línea de tiempo no cabe en el hueco que queda
+   entre ambas y siempre queda tapada en parte. Con 52vh el hueco (~230px)
+   alcanza para la línea de tiempo; en pantallas bajas, 44vh. */
+@media (max-height: 820px) {
+  .preview-stage { max-height: 44vh; }
 }
 .preview-stage video, .preview-stage img { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
 .preview-texts { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
