@@ -122,9 +122,32 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .project-meta { color: var(--muted); font-size: .85rem; margin: .2rem 0 .8rem; }
 .project-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
 
-/* ---- Editor ---- */
+/* ---- Editor (estilo CapCut: vista previa grande arriba, línea de tiempo
+   debajo, barra de herramientas abajo y paneles debajo de ella) ---- */
 .editor-head-actions { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
-.editor-layout { display: grid; grid-template-columns: 260px 1fr 300px; gap: 1rem; align-items: start; }
+.editor-layout {
+  display: grid; gap: 1rem; align-items: start;
+  grid-template-columns: 300px 1fr;
+  grid-template-areas: "center center" "toolbar toolbar" "media inspector";
+}
+.editor-center { grid-area: center; width: 100%; max-width: 880px; margin: 0 auto; justify-self: center; }
+.editor-toolbar {
+  grid-area: toolbar; position: sticky; bottom: 0; z-index: 20;
+  display: flex; gap: .45rem; overflow-x: auto; padding: .6rem;
+  background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.tool-btn {
+  flex: none; background: var(--bg-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 999px; padding: .5rem .9rem; cursor: pointer; font-size: .9rem; font-weight: 600;
+  white-space: nowrap;
+}
+.tool-btn:hover { border-color: var(--violet); }
+.tool-btn:active { transform: scale(.97); }
+.media-panel { grid-area: media; }
+.inspector { grid-area: inspector; }
+.panel-hidden { display: none !important; }
+.jk-card.flash { animation: jkflash 1.2s ease; }
+@keyframes jkflash { 0%, 100% { box-shadow: none; } 30% { box-shadow: 0 0 0 3px #f59e0b; } }
 .panel { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem; }
 .gallery-list { display: flex; flex-direction: column; gap: .5rem; max-height: 46vh; overflow-y: auto; }
 .gallery-item {
@@ -143,7 +166,7 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .preview-wrap { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: .8rem; margin-bottom: 1rem; }
 .preview-stage {
   position: relative; margin: 0 auto; background: #000; border-radius: 8px;
-  overflow: hidden; aspect-ratio: 9 / 16; max-height: 58vh;
+  overflow: hidden; aspect-ratio: 9 / 16; max-height: 62vh;
 }
 .preview-stage video, .preview-stage img { width: 100%; height: 100%; object-fit: contain; display: block; background: #000; }
 .preview-texts { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -219,6 +242,14 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 .settings-card label { margin-bottom: .4rem; }
 .settings-card .btn { margin-top: .5rem; }
 
+/* ---- Estilo J'K ---- */
+.jk-card {
+  background: linear-gradient(160deg, #2a1f0d, var(--card));
+  border: 1px solid #b45309; border-radius: var(--radius); padding: .8rem 1rem; margin: .8rem 0;
+}
+.jk-card h2 { margin-bottom: .3rem; }
+.clip.placeholder { border: 2px dashed #f59e0b; background: #451a03; color: #fde68a; }
+
 /* ---- Toasts ---- */
 #toasts { position: fixed; bottom: 1rem; right: 1rem; display: flex; flex-direction: column; gap: .5rem; z-index: 100; max-width: min(420px, 90vw); }
 .toast {
@@ -231,12 +262,14 @@ input[type="color"] { padding: 0; height: 2.2rem; border: 1px solid var(--border
 
 /* ---- Responsive ---- */
 @media (max-width: 1100px) {
-  .editor-layout { grid-template-columns: 230px 1fr; }
-  .inspector { grid-column: 1 / -1; }
+  .editor-layout { grid-template-columns: 260px 1fr; }
   .clone-layout { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
-  .editor-layout { grid-template-columns: 1fr; }
+  .editor-layout { grid-template-columns: 1fr; grid-template-areas: "center" "toolbar" "media" "inspector"; }
+  /* En el teléfono los paneles empiezan cerrados: se abren desde la barra
+     de herramientas, como en CapCut. En escritorio siempre se ven. */
+  .editor-layout .panel:not(.panel-open) { display: none; }
   .mainnav { margin-left: 0; }
   .clone-takes { grid-template-columns: 1fr; }
   .field-grid { grid-template-columns: 1fr; }
