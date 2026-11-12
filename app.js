@@ -114,6 +114,7 @@ function createFallbackEngine() {
     async trim() { throw new Error('Recortar necesita el motor de vídeo (js/engine.js), aún no disponible.'); },
     async setSpeed() { throw new Error('Cambiar la velocidad necesita el motor de vídeo (js/engine.js), aún no disponible.'); },
     async applyFilters() { throw new Error('Los filtros necesitan el motor de vídeo (js/engine.js), aún no disponible.'); },
+    async applyComic() { throw new Error('El Cómic necesita el motor de vídeo (js/engine.js), aún no disponible.'); },
     async chromaKey() { throw new Error('El croma necesita el motor de vídeo (js/engine.js), aún no disponible.'); },
     async applyTransition() { throw new Error('Las transiciones necesitan el motor de vídeo (js/engine.js), aún no disponible.'); },
     async stabilize() { throw new Error('Estabilizar necesita el motor de vídeo (js/engine.js), aún no disponible.'); },
@@ -395,6 +396,8 @@ function projectDuration() {
 }
 function clipDuration(c) {
   if (state.clipDurations.has(c.id)) return state.clipDurations.get(c.id);
+  // Hueco de la Plantilla J'K: sin medio aún, su duración es la del hueco.
+  if (c.placeholder) return Math.max(0.1, ((c.trimEnd ?? 3) - (c.trimStart || 0)) / (c.speed || 1));
   // Sin probe aún: imagen 3 s, vídeo 3 s provisional hasta que el probe lo corrija.
   const d = c.kind === 'image' ? (((c.trimEnd ?? 3) - (c.trimStart || 0)) / (c.speed || 1)) : 3;
   return Math.max(0.1, d);
@@ -402,6 +405,12 @@ function clipDuration(c) {
 async function refreshClipDurations() {
   if (!state.project) return;
   for (const c of state.project.clips) {
+    // Hueco de la Plantilla J'K: sin medio que probar; duración del hueco.
+    if (c.placeholder) {
+      const end = c.trimEnd ?? 3;
+      state.clipDurations.set(c.id, Math.max(0.1, (end - (c.trimStart || 0)) / (c.speed || 1)));
+      continue;
+    }
     try {
       const pr = await probe(c.mediaId);
       const base = c.kind === 'image' ? 3 : (pr.duration || 3);
@@ -516,13 +525,33 @@ $('#file-upload').addEventListener('change', async e => {
 
 async function addMediaToTimeline(m) {
   if (!state.project) { toast('Abre primero un proyecto en el Editor.', 'error'); return; }
+  // Rellenar un hueco de la Plantilla J'K: si el clip seleccionado es un
+  // hueco, el medio elegido lo rellena en vez de añadirse como clip nuevo.
+  // El look y la duración del hueco se conservan.
+  if (m.kind !== 'audio' && state.selection && state.selection.track === 'video') {
+    const sel = selectedItem();
+    if (sel && sel.item && sel.item.placeholder) {
+      const c = sel.item;
+      const slotName = c.name || 'hueco';
+      c.mediaId = m.id;
+      c.kind = m.kind;
+      c.name = m.name;
+      c.placeholder = false;
+      delete c.slot;
+      state.clipDurations.delete(c.id);
+      await saveProject(true);
+      await renderEditor();
+      toast('Hueco «' + slotName + '» rellenado con «' + m.name + '».', 'success', 3000);
+      return;
+    }
+  }
   if (m.kind === 'audio') {
     state.project.audios.push({ id: uid(), mediaId: m.id, name: m.name, trimStart: 0, trimEnd: null, volume: 1, start: state.playhead, keyframes: [] });
     toast('Audio añadido en ' + fmtTime(state.playhead) + '.', 'success', 3000);
   } else {
     const clip = {
       id: uid(), kind: m.kind, mediaId: m.id, name: m.name, trimStart: 0, trimEnd: null, speed: 1,
-      filters: { brightness: 0, contrast: 1, saturation: 1 },
+      filters: { brightness: 0, contrast: 1, saturation: 1, preset: 'none' },
       chroma: null, transition: { type: 'none', duration: 0.5 }, keyframes: [], volume: 1,
     };
     state.project.clips.push(clip);
@@ -570,7 +599,7 @@ function trackItemEls(track, items, clsFn, labelFn, durFn) {
 function renderTimeline() {
   if (!state.project) return;
   const p = state.project;
-  trackItemEls('video', p.clips, c => c.kind, c => c.name || 'Clip', c => clipDuration(c));
+  trackItemEls('video', p.clips, c => c.kind + (c.placeholder ? ' placeholder' : ''), c => c.name || 'Clip', c => clipDuration(c));
   trackItemEls('texts', p.texts, () => 'text', t => t.text || 'Texto', t => Math.max(0.1, (t.end - t.start)));
   trackItemEls('audio', p.audios, () => 'audio', a => a.name || 'Audio', a => {
     const end = a.trimEnd ?? 3; return Math.max(0.1, end - (a.trimStart || 0));
@@ -684,6 +713,7 @@ async function updatePreview() {
   if (!p || !p.clips.length) {
     videoEl.removeAttribute('src'); videoEl.load();
     imgEl.hidden = true; videoEl.hidden = true;
+    emptyEl.textContent = 'Añade un clip desde la galería para verlo aquí.';
     emptyEl.style.display = 'flex';
     $('#preview-texts').innerHTML = '';
     return;
@@ -697,6 +727,16 @@ async function updatePreview() {
     start += d;
   }
   const offset = Math.max(0, t - start);
+  // Hueco de la Plantilla J'K: no hay medio que mostrar, solo el aviso
+  // (las letras y la cuenta atrás sí se ven encima del hueco).
+  if (cur.placeholder) {
+    videoEl.pause(); videoEl.hidden = true;
+    imgEl.hidden = true;
+    emptyEl.textContent = 'Hueco «' + (cur.name || 'sin rellenar') + '» — elige un medio de la galería para rellenarlo.';
+    emptyEl.style.display = 'flex';
+    renderPreviewTexts();
+    return;
+  }
   const url = await mediaURL(cur.mediaId).catch(() => null);
   if (!url) { toast('No se pudo cargar el medio del clip «' + (cur.name || '') + '».', 'error'); return; }
   if (cur.kind === 'image') {
@@ -821,6 +861,19 @@ function renderInspector() {
 
 function renderClipInspector(body, actions, c) {
   const h = document.createElement('h3'); h.textContent = 'Clip: ' + (c.name || 'sin nombre'); body.appendChild(h);
+  // Hueco de la Plantilla J'K: sin medio, solo duración y el aviso.
+  if (c.placeholder) {
+    const p = document.createElement('p'); p.className = 'note';
+    p.textContent = 'Este hueco es un marcador de la Plantilla J\'K. Elige un vídeo o una imagen de la galería (a la izquierda) y se rellenará con él. El look y la duración del hueco ya están puestos.';
+    body.appendChild(p);
+    const grid = document.createElement('div'); grid.className = 'field-grid';
+    grid.append(
+      numField('Recorte — inicio (s)', c.trimStart || 0, 0.1, 0, null, v => { c.trimStart = Math.max(0, v || 0); state.clipDurations.delete(c.id); refreshEditorAfterEdit(); }),
+      numField('Duración del hueco (s)', c.trimEnd ?? 3, 0.1, 0.1, null, v => { c.trimEnd = v || 3; state.clipDurations.delete(c.id); refreshEditorAfterEdit(); }),
+    );
+    body.appendChild(grid);
+    return;
+  }
   const grid = document.createElement('div'); grid.className = 'field-grid';
   grid.append(
     numField('Recorte — inicio (s)', c.trimStart || 0, 0.1, 0, null, v => { c.trimStart = Math.max(0, v || 0); state.clipDurations.delete(c.id); refreshEditorAfterEdit(); }),
@@ -834,6 +887,29 @@ function renderClipInspector(body, actions, c) {
   body.appendChild(sliderField('Brillo', c.filters.brightness ?? 0, -1, 1, 0.05, v => v.toFixed(2), v => { c.filters.brightness = v; refreshEditorAfterEdit(); }));
   body.appendChild(sliderField('Contraste', c.filters.contrast ?? 1, 0, 3, 0.05, v => v.toFixed(2), v => { c.filters.contrast = v; refreshEditorAfterEdit(); }));
   body.appendChild(sliderField('Saturación', c.filters.saturation ?? 1, 0, 3, 0.05, v => v.toFixed(2), v => { c.filters.saturation = v; refreshEditorAfterEdit(); }));
+
+  const lookLab = document.createElement('label'); lookLab.textContent = 'Look (Estilo J\'K)';
+  const lookSel = document.createElement('select');
+  [['none', 'Ninguno'], ['bw', 'Blanco y negro'], ['color', 'Color intenso'], ['comic', 'Cómic']].forEach(([v, label]) => {
+    const o = document.createElement('option'); o.value = v; o.textContent = label;
+    if (((c.filters && c.filters.preset) || 'none') === v) o.selected = true;
+    lookSel.appendChild(o);
+  });
+  const lookNote = document.createElement('p'); lookNote.className = 'note';
+  const lookNotes = {
+    none: 'Sin look: el clip se ve tal cual.',
+    bw: 'Blanco y negro con contraste: plano exterior desaturado, estilo J\'K.',
+    color: 'Color intenso y saturado: plano cercano con punch, estilo J\'K.',
+    comic: 'Cómic: colores planos + contornos negros (bordes + posterizado). Se aplica al exportar.',
+  };
+  lookNote.textContent = lookNotes[(c.filters && c.filters.preset) || 'none'] || lookNotes.none;
+  lookSel.addEventListener('change', () => {
+    c.filters = c.filters || { brightness: 0, contrast: 1, saturation: 1 };
+    c.filters.preset = lookSel.value;
+    lookNote.textContent = lookNotes[lookSel.value] || lookNotes.none;
+    refreshEditorAfterEdit();
+  });
+  lookLab.appendChild(lookSel); body.appendChild(lookLab); body.appendChild(lookNote);
 
   const hc = document.createElement('h3'); hc.textContent = 'Croma (quitar fondo verde/azul)'; body.appendChild(hc);
   const chromaRow = document.createElement('label'); chromaRow.className = 'check-row';
@@ -932,6 +1008,14 @@ function renderClipInspector(body, actions, c) {
     try { await Engine.applyFilters(c.mediaId, c.filters); toast('Filtros aplicados y guardados en la galería.', 'success'); clearURLCache(); renderGallery(); }
     catch (e) { toast('Filtros fallaron: ' + errMsg(e), 'error'); }
   });
+  mkBtn('🖍 Aplicar cómic', async () => {
+    if (!(await ensureEngine())) return;
+    try { await Engine.applyComic(c.mediaId); toast('Cómic aplicado y guardado en la galería.', 'success'); clearURLCache(); renderGallery(); }
+    catch (e) {
+      if (e && e.code === 'unsupported') toast('Tu motor de vídeo no incluye los filtros del Cómic.', 'error');
+      else toast('Cómic falló: ' + errMsg(e), 'error');
+    }
+  });
   if (c.chroma) mkBtn('🟢 Aplicar croma', async () => {
     if (!(await ensureEngine())) return;
     try { await Engine.chromaKey(c.mediaId, c.chroma); toast('Croma aplicado y guardado en la galería.', 'success'); clearURLCache(); renderGallery(); }
@@ -950,6 +1034,16 @@ function renderClipInspector(body, actions, c) {
 
 function renderTextInspector(body, actions, t) {
   const h = document.createElement('h3'); h.textContent = 'Texto'; body.appendChild(h);
+  const yb = document.createElement('button');
+  yb.type = 'button'; yb.className = 'btn small';
+  yb.textContent = '★ Aplicar estilo Letras amarillas';
+  yb.addEventListener('click', () => {
+    t.color = '#ffe600'; t.size = 80; t.bold = true; t.italic = false;
+    t.stroke = { color: '#000000', width: 6 }; t.bg = null; t.x = 0; t.y = 180;
+    refreshEditorAfterEdit(); renderInspector();
+    toast('Estilo Letras amarillas aplicado.', 'success', 3000);
+  });
+  body.appendChild(yb);
   const textLab = document.createElement('label'); textLab.textContent = 'Texto';
   const textInp = document.createElement('input'); textInp.type = 'text'; textInp.value = t.text || '';
   textInp.addEventListener('change', () => { t.text = textInp.value; refreshEditorAfterEdit(); renderTimeline(); });
@@ -1069,6 +1163,11 @@ function showExportDownload(blob, filename) {
 /* ---------- Exportar ---------- */
 $('#btn-export').addEventListener('click', async () => {
   if (!state.project || !state.project.clips.length) { toast('Añade al menos un clip antes de exportar.', 'error'); return; }
+  const pending = state.project.clips.filter(c => c.placeholder);
+  if (pending.length) {
+    toast('La plantilla tiene huecos sin rellenar: ' + pending.map(c => '«' + (c.name || 'hueco') + '»').join(', ') + '. Elige un medio de la galería para cada hueco.', 'error', 9000);
+    return;
+  }
   if (!(await ensureEngine())) return;
   state.project.exportHeight = parseInt($('#export-quality').value, 10) || 720;
   await saveProject(true);
@@ -1125,6 +1224,19 @@ $('#export-quality').addEventListener('change', async e => {
 });
 
 /* ================= IMÁGENES ================= */
+// «Foto realista»: la descripción del usuario se conserva tal cual como
+// sujeto, y se le añaden en inglés los calificadores fotográficos que el
+// modelo entiende mejor (luz natural, enfoque, anatomía realista). Verificado
+// con el caso real «Un perro surfeando arriba de una ola»: con la descripción
+// cruda el perro salía deforme; con el refuerzo sale coherente y realista
+// (perro nítido, patas sobre la tabla, ola bien definida).
+const PHOTO_REALISTIC_SUFFIX = 'photorealistic photo, natural light, sharp focus, realistic anatomy, detailed textures, true-to-life colors, high detail, coherent composition';
+function buildImagePrompt(userText, realistic) {
+  const t = (userText || '').trim();
+  if (!realistic || !t) return t;
+  if (/photorealistic/i.test(t)) return t;
+  return t + ', ' + PHOTO_REALISTIC_SUFFIX;
+}
 let pollinationsTimer = null;
 function pollinationsCountdown() {
   const btn = $('#btn-generate');
@@ -1149,6 +1261,8 @@ async function generateImage() {
   if (!prompt) { toast('Escribe primero una descripción para la imagen.', 'error'); return; }
   const ratio = $('#img-ratio').value;
   const model = $('#img-model').value;
+  const realistic = document.getElementById('img-realistic')?.checked !== false;
+  const finalPrompt = buildImagePrompt(prompt, realistic);
   const settings = await getSettingsSafe();
   if (model === 'hf' && !settings.hfToken) {
     toast('Para FLUX.1-schnell necesitas tu token gratis de Hugging Face — ponlo en Ajustes.', 'error', 8000);
@@ -1161,9 +1275,13 @@ async function generateImage() {
   try {
     let blob;
     if (model === 'pollinations') {
-      const longSide = settings.pollinationsKey ? 1024 : 768;
+      // Lado largo 1024 también sin clave (verificado: el endpoint anónimo
+      // lo acepta y da más detalle). El parámetro model lo ignora el
+      // endpoint anónimo image.pollinations.ai — siempre sirve su modelo
+      // por defecto; gen.pollinations.ai exige clave (401 sin ella).
+      const longSide = 1024;
       const { width, height } = genSize(ratio, longSide);
-      const url = 'https://image.pollinations.ai/prompt/' + encodeURIComponent(prompt) +
+      const url = 'https://image.pollinations.ai/prompt/' + encodeURIComponent(finalPrompt) +
         '?width=' + width + '&height=' + height + '&model=flux&nologo=true&seed=' + Math.floor(Math.random() * 1e9) +
         (settings.pollinationsKey ? '&key=' + encodeURIComponent(settings.pollinationsKey) : '');
       const res = await fetch(url);
@@ -1179,17 +1297,17 @@ async function generateImage() {
       blob = await res.blob();
     } else {
       const { width, height } = genSize(ratio, 1024);
-      blob = await hfImage(prompt, width, height, settings.hfToken);
+      blob = await hfImage(finalPrompt, width, height, settings.hfToken);
     }
-    const id = await Storage.saveMedia(blob, { name: prompt.slice(0, 80) + ' — ' + (model === 'hf' ? 'FLUX.1-schnell' : 'Pollinations Flux'), kind: 'image' });
+    const id = await Storage.saveMedia(blob, { name: prompt.slice(0, 80) + ' — ' + (model === 'hf' ? 'FLUX.1-schnell' : 'Pollinations'), kind: 'image' });
     try {
       const pr = await probeWithElement(id);
       await Storage.updateMediaMeta(id, { width: pr.width || null, height: pr.height || null, duration: null });
     } catch { /* meta opcional: la imagen queda guardada igualmente */ }
     clearURLCache();
-    $('#img-status').textContent = 'Imagen generada y guardada en la galería.';
+    $('#img-status').textContent = 'Imagen generada y guardada en la galería. Si no te gusta, pulsa «Generar imagen» otra vez para otra variante.';
     toast('Imagen generada y guardada en la galería.', 'success');
-    $('#img-prompt').value = '';
+    // La descripción NO se borra: así puedes generar otra variante sin reescribirla.
     await renderImages();
     return id;
   } catch (e) {
@@ -1271,7 +1389,7 @@ $('#img-model').addEventListener('change', async e => {
   const settings = await getSettingsSafe();
   $('#img-model-note').textContent = e.target.value === 'hf'
     ? (settings.hfToken ? 'FLUX.1-schnell con tu token de Hugging Face. Lado largo 1024.' : 'FLUX.1-schnell necesita tu token gratis de Hugging Face — ponlo en Ajustes.')
-    : 'Pollinations es gratis y sin clave. Si pide esperar, te avisaremos con una cuenta atrás de ~45 s entre imágenes.';
+    : 'Con «Foto realista» tu descripción se completa sola con luz natural, enfoque nítido y anatomía realista, para que la foto salga coherente y parezca real. Pollinations es gratis y sin clave. Si pide esperar, te avisaremos con una cuenta atrás de ~45 s entre imágenes.';
 });
 
 async function removeBackground(m) {
@@ -1488,6 +1606,144 @@ $('#btn-create-project').addEventListener('click', async () => {
 });
 $('#new-project-name').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btn-create-project').click(); });
 
+/* ================= Estilo J'K ================= */
+// Estilo de J'K (@jk_elements): reels ~25 s, cortes rápidos al ritmo,
+// antes/después (crudo + cuenta atrás 3-2-1 + edit final), color
+// cinematográfico (B/N desaturado alternando con color intenso, filtro
+// cómic) y letras grandes en amarillo.
+const JK_YELLOW = '#ffe600';
+const JK_LYRICS_SIZE = 80;
+const JK_LYRICS_Y = 180; // tercio inferior del lienzo (720p, centro = 0)
+
+function yellowLyricsText(text, start, end, y) {
+  return {
+    id: uid(), text, size: JK_LYRICS_SIZE, color: JK_YELLOW, bg: null,
+    stroke: { color: '#000000', width: 6 }, bold: true, italic: false,
+    x: 0, y: (y ?? JK_LYRICS_Y), start, end, keyframes: [],
+  };
+}
+
+async function addYellowLyricsAtPlayhead() {
+  if (!state.project) { toast('Abre primero un proyecto en el Editor.', 'error'); return; }
+  const t = yellowLyricsText('Tu letra aquí', state.playhead, state.playhead + 3);
+  state.project.texts.push(t);
+  state.selection = { track: 'texts', id: t.id };
+  await saveProject(true);
+  renderTimeline(); renderInspector(); updatePreview();
+  toast('Letras amarillas añadidas. Edita la letra en el inspector.', 'success', 3000);
+}
+
+function jkSlotClip(name, trimEnd, preset, slot) {
+  return {
+    id: uid(), kind: 'video', mediaId: null, name,
+    trimStart: 0, trimEnd, speed: 1,
+    filters: { brightness: 0, contrast: 1, saturation: 1, preset },
+    chroma: null, transition: { type: 'none', duration: 0.5 }, keyframes: [], volume: 1,
+    placeholder: true, slot,
+  };
+}
+
+async function createJKTemplate() {
+  // La plantilla es un proyecto nuevo: el abierto (si lo hay) queda guardado.
+  if (state.project) await saveProject(true);
+  const p = newProjectObject('Plantilla J\'K — reel 25 s', '9:16');
+  // Estructura ~25 s: crudo/BTS 11 s (la cuenta atrás 3-2-1 va sobre sus
+  // últimos 3 s, como en los antes/después de J'K), clip final 14 s con el
+  // look J'K (Cómic) + letras amarillas.
+  p.clips = [
+    jkSlotClip('① Crudo / BTS — toca para elegir tu clip', 11, 'none', 'bts'),
+    jkSlotClip('② Final — look J\'K (Cómic)', 14, 'comic', 'final'),
+  ];
+  const cd = (n, start) => ({
+    id: uid(), text: String(n), size: 200, color: JK_YELLOW, bg: null,
+    stroke: { color: '#000000', width: 8 }, bold: true, italic: false,
+    x: 0, y: 0, start, end: start + 1, keyframes: [],
+  });
+  p.texts = [
+    {
+      id: uid(), text: 'GUARDA ESTO', size: 56, color: JK_YELLOW, bg: null,
+      stroke: { color: '#000000', width: 5 }, bold: true, italic: false,
+      x: 0, y: -100, start: 0, end: 3, keyframes: [],
+    },
+    cd(3, 8), cd(2, 9), cd(1, 10),
+    yellowLyricsText('AL BERRO', 11, 15),
+  ];
+  p.audios = [];
+  try {
+    await Storage.saveProject(p);
+    toast('Plantilla J\'K creada: toca cada hueco y elige tu clip de la galería.', 'success', 8000);
+    await openProject(p.id);
+  } catch (e) { toast('No se pudo crear la plantilla: ' + errMsg(e), 'error'); }
+}
+
+async function applyLookJK() {
+  if (!state.project || !state.project.clips.length) { toast('Añade primero clips a la línea de tiempo.', 'error'); return; }
+  let kept = 0;
+  state.project.clips.forEach((c, i) => {
+    c.filters = c.filters || { brightness: 0, contrast: 1, saturation: 1 };
+    if (c.filters.preset === 'comic') { kept++; return; } // el Cómic se respeta
+    c.filters.preset = i % 2 === 0 ? 'bw' : 'color';
+  });
+  await saveProject(true);
+  renderTimeline(); renderInspector();
+  toast('Look J\'K aplicado: B/N y color intenso alternos' + (kept ? ' (el Cómic se respeta).' : '.'), 'success', 5000);
+}
+
+async function applyComicToSelected() {
+  const sel = selectedItem();
+  if (!sel || !sel.item || state.selection.track !== 'video') { toast('Selecciona primero un clip de vídeo en la línea de tiempo.', 'error'); return; }
+  const c = sel.item;
+  if (c.placeholder) { toast('Ese hueco aún no tiene clip. Rellénalo primero desde la galería.', 'error'); return; }
+  c.filters = c.filters || { brightness: 0, contrast: 1, saturation: 1 };
+  c.filters.preset = 'comic';
+  await saveProject(true);
+  renderTimeline(); renderInspector();
+  toast('Cómic aplicado al clip «' + (c.name || '') + '». Se verá al exportar.', 'success', 4000);
+}
+
+$('#btn-jk-template').addEventListener('click', createJKTemplate);
+$('#btn-jk-template-projects').addEventListener('click', createJKTemplate);
+$('#btn-jk-lyrics').addEventListener('click', addYellowLyricsAtPlayhead);
+$('#btn-jk-look').addEventListener('click', applyLookJK);
+$('#btn-jk-comic').addEventListener('click', applyComicToSelected);
+
+/* ================= Barra de herramientas del editor (estilo CapCut) ================= */
+// Vista previa grande arriba, línea de tiempo debajo y botones abajo. En el
+// teléfono los paneles empiezan cerrados y se abren desde aquí; en escritorio
+// siempre se ven (salvo que el usuario los cierre con su botón).
+function showEditorPanel(el) {
+  el.classList.remove('panel-hidden');
+  el.classList.add('panel-open');
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function toggleEditorPanel(el) {
+  const visible = el.offsetParent !== null && !el.classList.contains('panel-hidden');
+  if (visible) { el.classList.add('panel-hidden'); el.classList.remove('panel-open'); }
+  else showEditorPanel(el);
+}
+function showInspectorSection(heading) {
+  const insp = document.querySelector('.inspector');
+  showEditorPanel(insp);
+  if (!selectedItem()) { toast('Selecciona un clip en la línea de tiempo para editarlo.', 'error'); return; }
+  const hit = [...document.querySelectorAll('#inspector-body h3, #inspector-body label')]
+    .find(h => (h.textContent || '').includes(heading));
+  if (hit) hit.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+$('#tb-media').addEventListener('click', () => toggleEditorPanel(document.querySelector('.media-panel')));
+$('#tb-text').addEventListener('click', () => $('#btn-add-text').click());
+$('#tb-split').addEventListener('click', () => $('#btn-split').click());
+$('#tb-filters').addEventListener('click', () => showInspectorSection('Filtros'));
+$('#tb-speed').addEventListener('click', () => showInspectorSection('Velocidad'));
+$('#tb-transition').addEventListener('click', () => showInspectorSection('Transición'));
+$('#tb-keyframes').addEventListener('click', () => showInspectorSection('Keyframes'));
+$('#tb-jk').addEventListener('click', () => {
+  showEditorPanel(document.querySelector('.media-panel'));
+  const card = document.getElementById('jk-card');
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+});
+$('#tb-inspector').addEventListener('click', () => toggleEditorPanel(document.querySelector('.inspector')));
+
 /* ================= Arranque ================= */
 async function init() {
   await loadModules();
@@ -1501,6 +1757,7 @@ async function init() {
     engine: Engine,
     storage: Storage,
     app,
+    buildImagePrompt,
     get ready() { return !!(Engine && Engine.ready); },
   };
   const settings = await getSettingsSafe();
