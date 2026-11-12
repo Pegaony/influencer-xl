@@ -48,6 +48,7 @@
           </select>
         </label>
         <button type="button" class="btn primary" id="btn-create-project">+ Crear proyecto</button>
+        <button type="button" class="btn" id="btn-jk-template-projects">🎬 Plantilla J'K — reel 25 s</button>
       </div>
     </div>
     <div id="projects-list" class="projects-list"></div>
@@ -77,6 +78,17 @@
           <button type="button" class="btn primary" id="btn-upload-media">⬆ Subir archivo</button>
           <input type="file" id="file-upload" accept="video/*,image/*,audio/*" multiple hidden>
           <button type="button" class="btn" id="btn-generate-image">✦ Generar imagen</button>
+        </div>
+        <div class="jk-card" id="jk-card">
+          <h2>🎬 Estilo J'K</h2>
+          <p class="muted small">Reel ~25 s: crudo + cuenta atrás 3-2-1 + edit final con letras amarillas.</p>
+          <div class="btn-col">
+            <button type="button" class="btn primary" id="btn-jk-template">🎬 Plantilla J'K — reel 25 s</button>
+            <button type="button" class="btn" id="btn-jk-lyrics">＋ Letras amarillas</button>
+            <button type="button" class="btn" id="btn-jk-look">🎨 Look J'K (B/N ↔ color)</button>
+            <button type="button" class="btn" id="btn-jk-comic">🖍 Cómic al clip seleccionado</button>
+          </div>
+          <p class="muted small">El Cómic son colores planos + contornos negros. El Look J'K alterna blanco y negro con color intenso en los clips (el Cómic se respeta).</p>
         </div>
         <h3>Galería</h3>
         <p class="muted small" id="gallery-hint">Sube un vídeo, una imagen o un audio para empezar.</p>
@@ -129,6 +141,18 @@
         </div>
       </div>
 
+      <div class="editor-toolbar" id="editor-toolbar" role="toolbar" aria-label="Herramientas del editor">
+        <button type="button" class="tool-btn" id="tb-media">📁 Medios</button>
+        <button type="button" class="tool-btn" id="tb-text">＋ Texto</button>
+        <button type="button" class="tool-btn" id="tb-split">✂ Dividir</button>
+        <button type="button" class="tool-btn" id="tb-filters">🎨 Filtros</button>
+        <button type="button" class="tool-btn" id="tb-speed">⏩ Velocidad</button>
+        <button type="button" class="tool-btn" id="tb-transition">🔀 Transición</button>
+        <button type="button" class="tool-btn" id="tb-keyframes">✨ Keyframes</button>
+        <button type="button" class="tool-btn" id="tb-jk">🎬 Estilo J'K</button>
+        <button type="button" class="tool-btn" id="tb-inspector">🔍 Inspector</button>
+      </div>
+
       <aside class="panel inspector" aria-label="Inspector">
         <h2>Inspector</h2>
         <div id="inspector-body"><p class="muted">Selecciona un clip, un texto o un audio en la línea de tiempo para editarlo.</p></div>
@@ -176,13 +200,16 @@
         </label>
         <label>Modelo
           <select id="img-model">
-            <option value="pollinations" selected>Pollinations Flux (sin clave)</option>
+            <option value="pollinations" selected>Pollinations — foto gratis (sin clave)</option>
             <option value="hf">Hugging Face FLUX.1-schnell (necesita token)</option>
           </select>
         </label>
+        <label class="check-row">📷 Foto realista
+          <input type="checkbox" id="img-realistic" checked>
+        </label>
         <button type="button" class="btn primary" id="btn-generate">✦ Generar imagen</button>
       </div>
-      <p class="muted small" id="img-model-note">Pollinations es gratis y sin clave. Si pide esperar, te avisaremos con una cuenta atrás de ~45 s entre imágenes.</p>
+      <p class="muted small" id="img-model-note">Con «Foto realista» tu descripción se completa sola con luz natural, enfoque nítido y anatomía realista, para que la foto salga coherente y parezca real. Pollinations es gratis y sin clave. Si pide esperar, te avisaremos con una cuenta atrás de ~45 s entre imágenes.</p>
       <p class="muted small" id="img-status" role="status"></p>
     </div>
     <h2 class="section-title">Galería de imágenes</h2>
@@ -264,7 +291,7 @@
       <label>Clave de Pollinations (opcional)
         <input type="password" id="setting-pollinations-key" placeholder="Opcional — sin clave funciona igual" autocomplete="off">
       </label>
-      <p class="muted small">Con clave, Pollinations genera a mayor resolución (lado largo 1024 en vez de 768).</p>
+      <p class="muted small">La clave es opcional — sin clave funciona igual.</p>
       <button type="button" class="btn primary" id="btn-save-settings">Guardar ajustes</button>
       <span class="muted small" id="settings-status" role="status"></span>
     </div>
@@ -277,7 +304,7 @@
       <h2>Acerca de</h2>
       <p><strong>INFLUENCER XL</strong> — <span id="about-version">v1</span> (fase 1, versión web).</p>
       <p class="muted small">Editor de vídeo en el dispositivo: recorta, añade textos y audios, genera imágenes y compone tu clon. Sin cuentas, sin nube y sin subir tus vídeos a ningún servidor.</p>
-      <p class="muted small">Licencias: código propio de INFLUENCER XL bajo Apache-2.0. El motor de vídeo usa FFmpeg (ffmpeg.wasm, licenciado bajo LGPL/GPL según la compilación) y el núcleo incluido en vendor/. Las imágenes se generan con Pollinations (modelo Flux) o con Hugging Face (FLUX.1-schnell y RMBG-1.4 de briaai), servicios externos con sus propias condiciones de uso.</p>
+      <p class="muted small">Licencias: código propio de INFLUENCER XL bajo Apache-2.0. El motor de vídeo usa FFmpeg (ffmpeg.wasm, licenciado bajo LGPL/GPL según la compilación) y el núcleo incluido en vendor/. Las imágenes se generan con Pollinations (foto gratis, sin clave) o con Hugging Face (FLUX.1-schnell y RMBG-1.4 de briaai), servicios externos con sus propias condiciones de uso.</p>
     </div>
   </section>
 </main>
